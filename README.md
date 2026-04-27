@@ -37,11 +37,13 @@ Requires Node 22+ (for the built-in `node:sqlite` module).
 ```
 git clone https://github.com/ebrown-cell/EnLogosGRAG.git
 cd EnLogosGRAG
-npm install
-npm start
+scripts\run.bat        # Windows
+scripts/run.sh         # macOS / Linux
 ```
 
-Open http://localhost:8780.
+The launcher checks Node, runs `npm install` on first use, starts the server, and opens http://localhost:8780/ in your default browser. Pass `--no-open` to skip the browser launch, or set `PORT=9000` to listen on a different port.
+
+If you'd rather skip the launcher: `npm install && npm start`.
 
 The first time:
 1. **Choose folder…** in the sidebar → pick the directory whose subfolders are vendor names. Server generates `basic_listing.txt` inside it (skipped if one already exists).
