@@ -1,0 +1,187 @@
+# Content-based document_type classifier rules.
+#
+# Same shape as classifier.yaml, but `match` selects which extracted text
+# to test against:
+#   first_page  → the first ~PDF page break (best signal — covers/title pages)
+#   extract     → the full extracted text
+#
+# First match wins. Place specific patterns above general ones. Patterns
+# are JS regexes (no leading/trailing slashes), case-insensitive.
+
+rules:
+
+  # --- Listing certificates: very strong cover-page signals ---
+  - id: csfm_cert
+    document_type: listing_certificate
+    confidence: high
+    match: first_page
+    pattern: 'California State Fire Marshal'
+  - id: ul_listing_cert
+    document_type: listing_certificate
+    confidence: high
+    match: first_page
+    pattern: '\b(UL Listed|UL Listing|Underwriters Laboratories)\b.{0,200}\b(certificate|listing\s*card|approval)\b'
+  - id: fm_listing_cert
+    document_type: listing_certificate
+    confidence: high
+    match: first_page
+    pattern: '\b(Factory Mutual|FM Approval|FM Approved)\b'
+  - id: etl_listing_cert
+    document_type: listing_certificate
+    confidence: medium
+    match: first_page
+    pattern: '\bETL Listed\b|\bIntertek\s+Listed\b'
+
+  # --- Datasheets: cover-page anchors ---
+  - id: datasheet_first_page
+    document_type: datasheet
+    confidence: high
+    match: first_page
+    pattern: '\b(Data\s*Sheet|Spec(ification)?\s*Sheet|Cut\s*Sheet|Product\s*Data)\b'
+  - id: datasheet_specs_section
+    document_type: datasheet
+    confidence: medium
+    match: first_page
+    pattern: '\b(Electrical\s+Specifications?|Mechanical\s+Specifications?|Storage\s+Temperature|Operating\s+Temperature)\b'
+
+  # --- Installation manual: very strong title-page indicators ---
+  - id: install_manual_first_page
+    document_type: installation_manual
+    confidence: high
+    match: first_page
+    pattern: '\b(Installation\s+(Manual|Guide|Instructions?))\b'
+  - id: install_manual_body
+    document_type: installation_manual
+    confidence: medium
+    match: extract
+    pattern: '\b(prior to installation|mounting requirements|backbox dimensions|conduit knockouts)\b'
+
+  # --- Programming manual: distinct vocabulary ---
+  - id: programming_manual_first_page
+    document_type: programming_manual
+    confidence: high
+    match: first_page
+    pattern: '\b(Programming\s+(Manual|Guide|Reference|Handbook))\b'
+  - id: programming_manual_body
+    document_type: programming_manual
+    confidence: medium
+    match: extract
+    pattern: '\b(default\s+(installer|master)\s+code|enter\s+programming\s+mode|press\s+\*\s*8\s+to\s+enter)\b'
+
+  # --- Operations / operating instructions ---
+  - id: operations_manual_first_page
+    document_type: operations_manual
+    confidence: high
+    match: first_page
+    pattern: '\b(Operation(s)?\s+Manual|User\s+Manual|Owner''?s?\s+Manual)\b'
+  - id: operating_instructions_first_page
+    document_type: operating_instructions
+    confidence: high
+    match: first_page
+    pattern: '\bOperating\s+Instructions\b'
+
+  # --- Wiring guide ---
+  - id: wiring_guide_first_page
+    document_type: wiring_guide
+    confidence: high
+    match: first_page
+    pattern: '\bWiring\s+(Guide|Diagram|Manual|Instructions?)\b'
+  - id: wiring_guide_body
+    document_type: wiring_guide
+    confidence: medium
+    match: extract
+    pattern: '\b(twisted\s+pair|shielded\s+cable|AWG\s+(14|16|18|22)|loop\s+wiring|class\s+[AB]\s+wiring)\b'
+
+  # --- Reporting codes ---
+  - id: reporting_codes_first_page
+    document_type: reporting_codes
+    confidence: high
+    match: first_page
+    pattern: '\b(Reporting\s+Codes?|Event\s+Codes?|Fault\s+Codes?|Trouble\s+Codes?)\b'
+
+  # --- Compatibility document ---
+  - id: compatibility_first_page
+    document_type: compatibility_document
+    confidence: high
+    match: first_page
+    pattern: '\b(Compatibility\s+(List|Document|Matrix|Chart|Guide))\b'
+
+  # --- Network guide ---
+  - id: network_guide_first_page
+    document_type: network_guide
+    confidence: high
+    match: first_page
+    pattern: '\b(Network\s+(Guide|Manual|Setup|Configuration))\b'
+
+  # --- Reference guide ---
+  - id: reference_guide_first_page
+    document_type: reference_guide
+    confidence: high
+    match: first_page
+    pattern: '\b(Reference\s+(Guide|Manual)|Quick\s+Reference)\b'
+
+  # --- Training material ---
+  - id: training_first_page
+    document_type: training
+    confidence: high
+    match: first_page
+    pattern: '\b(Training\s+(Manual|Workbook|Course|Guide)|Certification\s+Course|Student\s+Workbook)\b'
+
+  # --- Inspection report ---
+  - id: inspection_report_first_page
+    document_type: inspection_report
+    confidence: high
+    match: first_page
+    pattern: '\b(Inspection\s+Report|Annual\s+Inspection|Fire\s+Alarm\s+Inspection)\b'
+  - id: inspection_report_body
+    document_type: inspection_report
+    confidence: medium
+    match: extract
+    pattern: '\b(date\s+of\s+inspection|deficiencies\s+noted|inspector\s+signature|owner\s+acknowledgement)\b'
+
+  # --- Program sheet (fill-in worksheets) ---
+  - id: program_sheet_body
+    document_type: program_sheet
+    confidence: high
+    match: extract
+    pattern: '\b(Zone\s*0?[1-9]\s*[:#]|Partition\s*[12]\s*[:#]|User\s+Code\s*[:#]|Master\s+Code\s*[:#])\b'
+
+  # --- Drawings / schematics ---
+  - id: drawing_first_page
+    document_type: drawing
+    confidence: medium
+    match: first_page
+    pattern: '\b(Riser\s+Diagram|Floor\s+Plan|Panel\s+Layout|Wiring\s+Schematic|Single\s+Line\s+Diagram)\b'
+
+  # --- Contract / commercial ---
+  - id: contract_first_page
+    document_type: contract
+    confidence: high
+    match: first_page
+    pattern: '\b(Service\s+Agreement|Maintenance\s+Agreement|Scope\s+of\s+Work|Master\s+Services?\s+Agreement)\b'
+  - id: estimate_first_page
+    document_type: estimate
+    confidence: high
+    match: first_page
+    pattern: '\b(Cost\s+Estimate|Project\s+Estimate|Bid\s+Proposal|Quote\s*#)\b'
+
+  # --- Design document ---
+  - id: design_doc_first_page
+    document_type: design_document
+    confidence: high
+    match: first_page
+    pattern: '\b(Design\s+(Narrative|Document|Package)|Battery\s+Calculation|Voltage\s+Drop\s+Calculation)\b'
+
+  # --- Addendum ---
+  - id: addendum_first_page
+    document_type: addendum
+    confidence: high
+    match: first_page
+    pattern: '\b(Addendum|Replacement\s+Pages?|Supplement\s+to|This\s+document\s+supersedes)\b'
+
+  # --- Service / field record ---
+  - id: service_record_body
+    document_type: service_record
+    confidence: medium
+    match: extract
+    pattern: '\b(Service\s+Call|Trouble\s+Ticket|Repair\s+Order|Service\s+Visit\s+Report)\b'

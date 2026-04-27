@@ -1,0 +1,9 @@
+node_modules/
+test.db
+test.db-journal
+test.db-wal
+test.db-shm
+uploads/
+*.log
+.DS_Store
+Thumbs.db

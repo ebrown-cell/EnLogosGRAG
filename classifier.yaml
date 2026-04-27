@@ -1,0 +1,194 @@
+# Filename/path-based document_type classifier rules.
+#
+# Rules are applied in order; the FIRST match wins. Put more specific patterns
+# above more general ones. Patterns are JS regexes (no leading/trailing slashes,
+# always case-insensitive).
+#
+# Each rule:
+#   id              unique short identifier (used in logs / debugging)
+#   document_type   must match a name in the document_types table
+#   confidence      high | medium | low
+#   match           which string to test: name | parent | path | file_type
+#   pattern         regex string
+#
+# `name`      = filename (e.g. "EVAX-50_Installation.pdf")
+# `parent`    = immediate parent dir name (e.g. "Manuals")
+# `path`      = full Windows path
+# `file_type` = lowercased extension with leading dot (e.g. ".pdf")
+#
+# Add as many rules as you want — no perf penalty matters at this scale.
+
+rules:
+
+  # --- Drawings: extension is unambiguous ---
+  - id: dwg_extension
+    document_type: drawing
+    confidence: high
+    match: file_type
+    pattern: '^\.(dwg|dxf)$'
+
+  # --- Listing certificates: CSFM/UL/FM/ETL or "_CSFM Listings" archive ---
+  - id: csfm_archive_path
+    document_type: listing_certificate
+    confidence: high
+    match: path
+    pattern: '_CSFM Listings'
+  - id: csfm_in_name
+    document_type: listing_certificate
+    confidence: high
+    match: name
+    pattern: '\b(csfm|ul listing|fm approv|etl listing|listing[\s_-]*cert)'
+  - id: cert_keyword
+    document_type: listing_certificate
+    confidence: medium
+    match: name
+    pattern: '\b(certificate|certification|approval[\s_-]*letter)'
+
+  # --- Datasheets / spec sheets ---
+  - id: datasheet_filename
+    document_type: datasheet
+    confidence: high
+    match: name
+    pattern: '\b(data[\s_-]*sheet|datasheet|spec[\s_-]*sheet|cut[\s_-]*sheet)\b'
+  - id: datasheet_parent
+    document_type: datasheet
+    confidence: medium
+    match: parent
+    pattern: '\b(data[\s_-]*sheets?|spec[\s_-]*sheets?|cut[\s_-]*sheets?)\b'
+
+  # --- Reporting codes ---
+  - id: reporting_codes
+    document_type: reporting_codes
+    confidence: high
+    match: name
+    pattern: '\breporting[\s_-]*codes?\b'
+
+  # --- Compatibility documents ---
+  - id: compatibility
+    document_type: compatibility_document
+    confidence: high
+    match: name
+    pattern: '\bcompatib(ility|le)\b'
+
+  # --- Wiring guides ---
+  - id: wiring_guide
+    document_type: wiring_guide
+    confidence: high
+    match: name
+    pattern: '\bwiring[\s_-]*(guide|diagram|manual|instructions)\b'
+
+  # --- Network guides ---
+  - id: network_guide
+    document_type: network_guide
+    confidence: high
+    match: name
+    pattern: '\bnetwork[\s_-]*(guide|manual|setup|configuration)\b'
+
+  # --- Program sheets: vendor-specific fill-in worksheets. Comes before
+  #     the programming_manual rule so a "Program Sheet" filename doesn't
+  #     accidentally hit programming_manual. ---
+  - id: program_sheet
+    document_type: program_sheet
+    confidence: high
+    match: name
+    pattern: '\bprogram[\s_-]*sheet\b'
+
+  # --- Manuals (specific before generic) ---
+  - id: install_manual_filename
+    document_type: installation_manual
+    confidence: high
+    match: name
+    pattern: '\binstall(ation|er)?[\s_-]*(manual|guide|instructions)\b'
+  - id: install_manual_short
+    document_type: installation_manual
+    confidence: high
+    match: name
+    pattern: '_install(ation)?\.|[\s_-]install(ation)?\.'
+  - id: programming_manual
+    document_type: programming_manual
+    confidence: high
+    match: name
+    pattern: '\bprogramming[\s_-]*(manual|guide|reference)\b'
+  - id: operations_manual
+    document_type: operations_manual
+    confidence: high
+    match: name
+    pattern: '\b(operations?|user)[\s_-]*manual\b'
+  - id: operating_instructions
+    document_type: operating_instructions
+    confidence: high
+    match: name
+    pattern: '\boperat(ing|ions?)[\s_-]*(instructions|guide)\b'
+
+  # --- Reference / training / inspection ---
+  - id: reference_guide
+    document_type: reference_guide
+    confidence: high
+    match: name
+    pattern: '\breference[\s_-]*(guide|manual)\b'
+  - id: training
+    document_type: training
+    confidence: medium
+    match: name
+    pattern: '\b(training|workbook|certif(ication|y)[\s_-]*course)\b'
+  - id: inspection_report
+    document_type: inspection_report
+    confidence: medium
+    match: name
+    pattern: '\binspection[\s_-]*(report|form|record)\b'
+
+  # --- Service / field notes ---
+  - id: service_record
+    document_type: service_record
+    confidence: medium
+    match: name
+    pattern: '\bservice[\s_-]*(record|report|log)\b'
+  - id: tech_note
+    document_type: technician_note
+    confidence: medium
+    match: name
+    pattern: '\b(tech|technician)[\s_-]*notes?\b'
+
+  # --- Commercial ---
+  - id: contract
+    document_type: contract
+    confidence: medium
+    match: name
+    pattern: '\b(contract|agreement|scope[\s_-]*of[\s_-]*work|sow)\b'
+  - id: estimate
+    document_type: estimate
+    confidence: medium
+    match: name
+    pattern: '\b(estimate|quote|proposal|bid|pricing[\s_-]*worksheet)\b'
+
+  # --- Design / addendum ---
+  - id: design_doc
+    document_type: design_document
+    confidence: medium
+    match: name
+    pattern: '\b(design[\s_-]*(document|narrative|package)|riser[\s_-]*diagram|fire[\s_-]*alarm[\s_-]*calculations?)\b'
+  - id: addendum
+    document_type: addendum
+    confidence: medium
+    match: name
+    pattern: '\b(addendum|addenda|supplement|replacement[\s_-]*page)\b'
+
+  # --- Generic "manual" → installation_manual is the most common ---
+  # Comes last so the more specific manual patterns above win first.
+  - id: generic_manual_low
+    document_type: installation_manual
+    confidence: low
+    match: name
+    pattern: '\bmanual\b'
+  - id: parent_manuals
+    document_type: installation_manual
+    confidence: low
+    match: parent
+    pattern: '\bmanuals?\b'
+
+  # --- Drawings: filename hints ---
+  - id: drawing_filename
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '\b(diagram|schematic|floor[\s_-]*plan|panel[\s_-]*layout|riser)\b'
