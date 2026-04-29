@@ -71,6 +71,53 @@ CREATE TABLE IF NOT EXISTS document_extracts (
     error        TEXT,
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS products (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id  INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    aliases    TEXT,
+    notes      TEXT,
+    UNIQUE (vendor_id, name),
+    FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_products_vendor ON products(vendor_id);
+
+CREATE TABLE IF NOT EXISTS document_products (
+    document_id  INTEGER NOT NULL,
+    product_id   INTEGER NOT NULL,
+    confidence   TEXT,
+    source       TEXT,
+    PRIMARY KEY (document_id, product_id),
+    FOREIGN KEY (document_id) REFERENCES documents(id)  ON DELETE CASCADE,
+    FOREIGN KEY (product_id)  REFERENCES products(id)   ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_products_doc     ON document_products(document_id);
+CREATE INDEX IF NOT EXISTS idx_doc_products_product ON document_products(product_id);
+
+-- Extensions in this table get ingested into files but are NOT given a
+-- documents row. That keeps them out of classification, content extraction,
+-- products, charts and the dashboard while still letting users see the raw
+-- inventory in the files table. Going-forward only: existing documents rows
+-- for an extension added later are left alone (re-ingest to apply).
+CREATE TABLE IF NOT EXISTS ignored_file_types (
+    ext        TEXT PRIMARY KEY,
+    added_at   TEXT NOT NULL,
+    notes      TEXT
+);
+
+-- Folder names ignored at ingest time. Exact name match (case-insensitive)
+-- against any segment of the path. The folder itself AND every descendant
+-- is dropped from the files table entirely, so they never reach documents,
+-- classification, charts, or the dashboard. Going-forward only: existing
+-- rows for a folder added later are left alone (re-ingest to apply).
+CREATE TABLE IF NOT EXISTS ignored_folders (
+    name       TEXT PRIMARY KEY,
+    added_at   TEXT NOT NULL,
+    notes      TEXT
+);
 `;
 
 // Hardcoded copy of EFI's Phase 2 prompt taxonomy

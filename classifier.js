@@ -88,14 +88,17 @@ export function classifyAll(db) {
   );
 
   // For each non-dir file, pull what the classifier needs plus the parent's
-  // name (for `match: parent` rules). documents.id is the row we update.
+  // name (for `match: parent` rules) and the existing classification so we
+  // can skip rows that already have a stricter result. documents.id is the
+  // row we update.
   const rows = db
     .prepare(`
-      SELECT d.id   AS doc_id,
-             f.path AS path,
-             f.name AS name,
-             p.name AS parent,
-             f.file_type AS file_type
+      SELECT d.id          AS doc_id,
+             d.confidence  AS prev_confidence,
+             f.path        AS path,
+             f.name        AS name,
+             p.name        AS parent,
+             f.file_type   AS file_type
       FROM documents d
       JOIN files f       ON f.id = d.file_id
       LEFT JOIN files p  ON p.id = f.parent_id
@@ -107,22 +110,41 @@ export function classifyAll(db) {
   const byConfidence = { high: 0, medium: 0, low: 0, none: 0 };
   let unknownDocType = 0;
   let updated = 0;
+  let kept = 0;        // existing classification beat or tied the new rule
 
   db.exec("BEGIN");
   try {
     for (const r of rows) {
       const result = classify(r);
+      const prevRank = r.prev_confidence ? (CONFIDENCE_RANK[r.prev_confidence] || 0) : 0;
+
       if (!result) {
-        update.run(null, null, r.doc_id);
+        // No filename rule fired. Only clear an existing classification if
+        // it was unset or low — never wipe a medium/high that some other
+        // pass (e.g. content classifier) wrote.
+        if (prevRank <= CONFIDENCE_RANK.low) {
+          update.run(null, null, r.doc_id);
+        } else {
+          kept++;
+        }
         byConfidence.none++;
         continue;
       }
       const dtId = docTypeIdByName.get(result.documentType);
       if (dtId === undefined) {
-        // Rule pointed at a doc_type that doesn't exist in the DB.
         unknownDocType++;
-        update.run(null, null, r.doc_id);
+        if (prevRank <= CONFIDENCE_RANK.low) update.run(null, null, r.doc_id);
+        else kept++;
         byConfidence.none++;
+        continue;
+      }
+
+      // Skip rows whose existing classification is at least as strong as
+      // what this rule would produce. Re-running the filename pass should
+      // not wipe out content-classifier wins.
+      const newRank = CONFIDENCE_RANK[result.confidence] || 0;
+      if (prevRank >= newRank && prevRank > 0) {
+        kept++;
         continue;
       }
       update.run(dtId, result.confidence, r.doc_id);
@@ -139,6 +161,7 @@ export function classifyAll(db) {
   return {
     totalFiles: rows.length,
     updated,
+    kept,
     byType,
     byConfidence,
     unknownDocType,
@@ -223,6 +246,180 @@ function classifyContent({ text, firstPage }) {
 export function reloadContentRules() {
   contentRules = loadContentRules();
   return contentRules.length;
+}
+
+// --- Product classifier --------------------------------------------------
+// Vendor-scoped rule engine. Each rule binds a (vendor, product) pair to
+// a regex against a path/name/text field; only fires when the document's
+// vendor matches the rule's vendor. Many-to-many results land in the
+// document_products table.
+
+const PRODUCT_RULES_PATH = path.join(__dirname, "product_classifier.yaml");
+const PRODUCT_VALID_MATCH = new Set(["name", "path", "first_page", "extract"]);
+
+let productRules = null;
+
+function loadProductRules() {
+  const raw = fs.readFileSync(PRODUCT_RULES_PATH, "utf8");
+  const doc = YAML.parse(raw);
+  if (!doc || !Array.isArray(doc.rules)) {
+    throw new Error("product_classifier.yaml must have a top-level rules: list");
+  }
+  const out = [];
+  for (const r of doc.rules) {
+    const id = r.id || `product_rule_${out.length}`;
+    if (!r.vendor)  throw new Error(`rule ${id} missing vendor`);
+    if (!r.product) throw new Error(`rule ${id} missing product`);
+    if (!VALID_CONFIDENCE.has(r.confidence)) {
+      throw new Error(`rule ${id} has invalid confidence ${r.confidence}`);
+    }
+    if (!PRODUCT_VALID_MATCH.has(r.match)) {
+      throw new Error(`rule ${id} has invalid match ${r.match}`);
+    }
+    if (!r.pattern) throw new Error(`rule ${id} missing pattern`);
+    out.push({
+      id,
+      vendor: r.vendor,
+      product: String(r.product),
+      confidence: r.confidence,
+      match: r.match,
+      regex: new RegExp(r.pattern, "i"),
+    });
+  }
+  return out;
+}
+
+function getProductRules() {
+  if (!productRules) productRules = loadProductRules();
+  return productRules;
+}
+
+export function reloadProductRules() {
+  productRules = loadProductRules();
+  return productRules.length;
+}
+
+// Run all product rules against every document. Inserts into products
+// table on demand, then upserts document_products links. A single
+// document can match multiple products (e.g. compatibility lists).
+export function classifyAllByProduct(db) {
+  reloadProductRules();
+  const rules = getProductRules();
+
+  // Group rules by vendor name for cheap lookup.
+  const rulesByVendor = new Map();
+  for (const r of rules) {
+    if (!rulesByVendor.has(r.vendor)) rulesByVendor.set(r.vendor, []);
+    rulesByVendor.get(r.vendor).push(r);
+  }
+
+  // Resolve vendor names → ids. Skip rules whose vendor doesn't exist.
+  const vendorIdByName = new Map(
+    db.prepare("SELECT id, name FROM vendors").all().map((r) => [r.name, r.id]),
+  );
+  const unknownVendors = new Set();
+  for (const v of rulesByVendor.keys()) {
+    if (!vendorIdByName.has(v)) unknownVendors.add(v);
+  }
+
+  // Pull every document with its vendor + path/name + extract text (when
+  // present). Doing this in one query avoids per-row roundtrips.
+  const rows = db.prepare(`
+    SELECT d.id          AS doc_id,
+           f.name        AS name,
+           f.path        AS path,
+           v.id          AS vendor_id,
+           v.name        AS vendor_name,
+           e.text        AS text
+    FROM documents d
+    JOIN files f         ON f.id = d.file_id
+    JOIN vendors v       ON v.id = f.vendor_id
+    LEFT JOIN document_extracts e ON e.document_id = d.id AND e.error IS NULL
+  `).all();
+
+  // Resolve products on demand — INSERT OR IGNORE keeps it idempotent.
+  const insertProduct = db.prepare(
+    "INSERT OR IGNORE INTO products (vendor_id, name) VALUES (?, ?)",
+  );
+  const lookupProduct = db.prepare(
+    "SELECT id FROM products WHERE vendor_id = ? AND name = ?",
+  );
+  const insertLink = db.prepare(
+    "INSERT OR REPLACE INTO document_products (document_id, product_id, confidence, source) " +
+    "VALUES (?, ?, ?, ?)",
+  );
+
+  // Cache product ids so we don't lookup repeatedly within a single run.
+  const productIdCache = new Map(); // "vendorId:name" -> productId
+  function ensureProduct(vendorId, productName) {
+    const key = vendorId + ":" + productName;
+    if (productIdCache.has(key)) return productIdCache.get(key);
+    insertProduct.run(vendorId, productName);
+    const r = lookupProduct.get(vendorId, productName);
+    const pid = r ? r.id : null;
+    if (pid) productIdCache.set(key, pid);
+    return pid;
+  }
+
+  const byVendor = {};       // vendor_name -> hits count
+  const byProduct = {};      // "vendor:product" -> hits count
+  let docsWithProducts = 0;
+  let totalLinks = 0;
+  let docsScanned = 0;
+
+  db.exec("BEGIN");
+  try {
+    // Wipe existing links for a clean re-classify. Re-running shouldn't
+    // accumulate stale rows when rules change.
+    db.exec("DELETE FROM document_products");
+
+    for (const r of rows) {
+      docsScanned++;
+      const vendorRules = rulesByVendor.get(r.vendor_name);
+      if (!vendorRules || vendorRules.length === 0) continue;
+
+      const firstPage = firstPageOf(r.text);
+      const seenInDoc = new Set();    // dedupe same product hit twice in one doc
+
+      for (const rule of vendorRules) {
+        const target =
+          rule.match === "name"       ? r.name :
+          rule.match === "path"       ? r.path :
+          rule.match === "first_page" ? firstPage :
+          /* extract */                 r.text;
+        if (!target) continue;
+        if (!rule.regex.test(target)) continue;
+
+        const productKey = rule.vendor + ":" + rule.product;
+        if (seenInDoc.has(productKey)) continue;
+        seenInDoc.add(productKey);
+
+        const pid = ensureProduct(r.vendor_id, rule.product);
+        if (!pid) continue;
+
+        insertLink.run(r.doc_id, pid, rule.confidence, rule.match);
+        byVendor[r.vendor_name]   = (byVendor[r.vendor_name]   || 0) + 1;
+        byProduct[productKey]     = (byProduct[productKey]     || 0) + 1;
+        totalLinks++;
+      }
+      if (seenInDoc.size > 0) docsWithProducts++;
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+
+  return {
+    rulesLoaded: rules.length,
+    docsScanned,
+    docsWithProducts,
+    totalLinks,
+    distinctProducts: db.prepare("SELECT COUNT(*) AS n FROM products").get().n,
+    byVendor,
+    byProduct,
+    unknownVendors: [...unknownVendors],
+  };
 }
 
 export function classifyAllByContent(db) {

@@ -35,7 +35,8 @@ const state = {
   running: false,
   shouldStop: false,
   total: 0,         // pdfs in this batch
-  done: 0,          // successfully extracted this batch
+  done: 0,          // newly extracted via pdfjs this batch
+  cached: 0,        // restored from filesystem backup this batch (no pdfjs run)
   failed: 0,        // extraction errors this batch
   skipped: 0,       // already extracted, skipped this batch
   currentDoc: null, // {id, path} or null
@@ -49,6 +50,7 @@ export function getStatus() {
     running: state.running,
     total: state.total,
     done: state.done,
+    cached: state.cached,
     failed: state.failed,
     skipped: state.skipped,
     currentDoc: state.currentDoc,
@@ -79,6 +81,7 @@ export function start(opts) {
   state.shouldStop = false;
   state.total = 0;
   state.done = 0;
+  state.cached = 0;
   state.failed = 0;
   state.skipped = 0;
   state.currentDoc = null;
@@ -131,18 +134,51 @@ async function runWorker(opts) {
     state.currentDoc = { id: row.doc_id, path: row.file_path };
 
     const localPath = pathRemapper(row.file_path);
+    const backupPath = backupPathFor(localPath);
     const ts = new Date().toISOString();
 
     let pageCount = null, text = null, pagesJson = null, metadata = null, errMsg = null;
+    let fromCache = false;
+
     try {
-      if (!fs.existsSync(localPath)) {
-        throw new Error("Local file not found: " + localPath);
+      // 1. Try the filesystem cache first. A successful prior extract
+      //    sits at <Vendors_text>/<rel-path>.json. Restoring is just a
+      //    JSON parse — no pdfjs invocation.
+      if (backupPath && fs.existsSync(backupPath)) {
+        const cached = JSON.parse(fs.readFileSync(backupPath, "utf8"));
+        pageCount = cached.pageCount ?? null;
+        text      = cached.text ?? null;
+        pagesJson = cached.pages ? JSON.stringify(cached.pages) : null;
+        metadata  = cached.metadata ? JSON.stringify(cached.metadata) : null;
+        fromCache = true;
+      } else {
+        if (!fs.existsSync(localPath)) {
+          throw new Error("Local file not found: " + localPath);
+        }
+        const result = await extractPdf(localPath);
+        pageCount = result.pageCount;
+        text      = result.text;
+        pagesJson = JSON.stringify(result.pages);
+        metadata  = result.metadata ? JSON.stringify(result.metadata) : null;
+
+        // 2. Persist the fresh extract to the filesystem cache. Best-effort:
+        //    if write fails (read-only volume, etc.) we still have the
+        //    DB row, so don't propagate the error.
+        if (backupPath) {
+          try {
+            fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+            fs.writeFileSync(backupPath, JSON.stringify({
+              extractedAt: ts,
+              pageCount: result.pageCount,
+              text: result.text,
+              pages: result.pages,
+              metadata: result.metadata,
+            }), "utf8");
+          } catch (e) {
+            console.warn("[extractor] backup write failed:", backupPath, e.message);
+          }
+        }
       }
-      const result = await extractPdf(localPath);
-      pageCount = result.pageCount;
-      text      = result.text;
-      pagesJson = JSON.stringify(result.pages);
-      metadata  = result.metadata ? JSON.stringify(result.metadata) : null;
     } catch (e) {
       errMsg = String(e.message || e);
     }
@@ -162,10 +198,34 @@ async function runWorker(opts) {
     if (errMsg) {
       state.failed++;
       state.lastError = errMsg;
+    } else if (fromCache) {
+      state.cached++;
     } else {
       state.done++;
     }
   }
+}
+
+// Map an absolute local PDF path to its filesystem-backup JSON path.
+// Finds the "vendors"-named segment (case-insensitive) and renames it to
+// <segment>_text. Returns null if no vendors segment exists (we won't
+// attempt to cache in that case — backup is opt-in via folder layout).
+//
+// Example:
+//   in:  C:\data\PyroCommData\PyroCommSubset\Vendors\Notifier\Manuals\foo.pdf
+//   out: C:\data\PyroCommData\PyroCommSubset\Vendors_text\Notifier\Manuals\foo.pdf.json
+function backupPathFor(localPath) {
+  if (!localPath) return null;
+  const parts = localPath.split(/[\\/]/);
+  const idx = parts.findIndex((p) => p.toLowerCase() === "vendors");
+  if (idx < 0) return null;
+  const newParts = parts.slice();
+  newParts[idx] = parts[idx] + "_text";
+  // Preserve the original separator style so the backup path matches
+  // the host's conventions (Windows paths stay backslashed, POSIX stays
+  // forward-slashed).
+  const sep = localPath.includes("\\") ? "\\" : "/";
+  return newParts.join(sep) + ".json";
 }
 
 // Extract one PDF. Returns { pageCount, text, pages: [...], metadata }.

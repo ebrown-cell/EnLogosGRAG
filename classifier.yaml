@@ -49,12 +49,14 @@ rules:
     document_type: datasheet
     confidence: high
     match: name
-    pattern: '\b(data[\s_-]*sheet|datasheet|spec[\s_-]*sheet|cut[\s_-]*sheet)\b'
+    # `\b` treats `_` as a word char, so `5499_Datasheet` wouldn't match.
+    # Use (?:^|[\W_])…(?:[\W_]|$) so underscores and dots act as separators.
+    pattern: '(?:^|[\W_])(data[\s_-]*sheet|datasheet|spec[\s_-]*sheet|cut[\s_-]*sheet)(?:[\W_]|$)'
   - id: datasheet_parent
     document_type: datasheet
     confidence: medium
     match: parent
-    pattern: '\b(data[\s_-]*sheets?|spec[\s_-]*sheets?|cut[\s_-]*sheets?)\b'
+    pattern: '(?:^|[\W_])(data[\s_-]*sheets?|spec[\s_-]*sheets?|cut[\s_-]*sheets?)(?:[\W_]|$)'
 
   # --- Reporting codes ---
   - id: reporting_codes

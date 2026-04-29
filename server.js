@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { openDb } from "./db.js";
 import { readListing, ingestVendors, ingestFiles } from "./listing.js";
-import { classifyAll, classifyAllByContent } from "./classifier.js";
+import { classifyAll, classifyAllByContent, classifyAllByProduct } from "./classifier.js";
 import * as extractor from "./extractor.js";
 
 // The extractor needs to translate canonical S:\ paths to local paths
@@ -22,7 +22,7 @@ const PORT = Number(process.env.PORT) || 8780;
 const DEFAULT_SOURCE = "C:\\data\\PyroCommData";
 const DEFAULT_LISTING_NAME = "basic_listing.txt";
 
-const TABLES = ["vendors", "document_types", "files", "documents", "document_extracts"];
+const TABLES = ["vendors", "document_types", "files", "documents", "document_extracts", "products", "document_products"];
 
 // Prefix remap for opening files. The listing in the DB uses canonical
 // share paths (S:\vendors\...) generated on a different machine. Locally,
@@ -74,6 +74,8 @@ function tableCounts(db) {
     files:             db.prepare("SELECT COUNT(*) AS n FROM files").get().n,
     documents:         db.prepare("SELECT COUNT(*) AS n FROM documents").get().n,
     document_extracts: db.prepare("SELECT COUNT(*) AS n FROM document_extracts").get().n,
+    products:          db.prepare("SELECT COUNT(*) AS n FROM products").get().n,
+    document_products: db.prepare("SELECT COUNT(*) AS n FROM document_products").get().n,
   };
 }
 
@@ -133,6 +135,10 @@ function handleStatus() {
     for (const r of byConfRows) {
       if (r.confidence in byConfidence) byConfidence[r.confidence] = r.n;
     }
+    const ignored = {
+      types:   db.prepare("SELECT COUNT(*) AS n FROM ignored_file_types").get().n,
+      folders: db.prepare("SELECT COUNT(*) AS n FROM ignored_folders").get().n,
+    };
     return {
       counts,
       defaultSource: DEFAULT_SOURCE,
@@ -142,6 +148,7 @@ function handleStatus() {
         unclassified: totalDocs - classified,
         byConfidence,
       },
+      ignored,
     };
   } finally {
     db.close();
@@ -190,10 +197,18 @@ function handleBrowse(body) {
         exactConfidence: body.exactConfidence || "",
         fileTypeFilters: Array.isArray(body.fileTypeFilters) ? body.fileTypeFilters : [],
         documentTypeFilters: Array.isArray(body.documentTypeFilters) ? body.documentTypeFilters : [],
+        productFilter: body.productFilter || "",
+        hasProductFilter: body.hasProductFilter || "",
       });
     }
     if (table === "document_extracts") {
       return browseExtracts(db, { limit, offset, filter });
+    }
+    if (table === "products") {
+      return browseProducts(db, { limit, offset, filter });
+    }
+    if (table === "document_products") {
+      return browseDocumentProducts(db, { limit, offset, filter });
     }
 
     const clauses = [];
@@ -241,9 +256,9 @@ function handleBrowse(body) {
 //   "low"    keeps low/medium/high (and excludes unclassified)
 //   "medium" keeps medium/high
 //   "high"   keeps high only
-function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters }) {
+function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter }) {
   const { from, where, args } = buildDocumentsWhere({
-    filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters,
+    filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter,
   });
   const total = db
     .prepare(`SELECT COUNT(*) AS n ${from} ${where}`)
@@ -336,6 +351,85 @@ function browseExtracts(db, { limit, offset, filter }) {
   return { ok: true, total, limit, offset, filter, columns, rows };
 }
 
+// Joined view of products with vendor_name resolved + a doc count from
+// document_products. Replaces the raw products view because vendor_id
+// alone is opaque.
+function browseProducts(db, { limit, offset, filter }) {
+  const FROM = `
+    FROM products p
+    JOIN vendors v ON v.id = p.vendor_id
+  `;
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = "WHERE v.name LIKE ? OR p.name LIKE ? OR (p.notes IS NOT NULL AND p.notes LIKE ?)";
+    const like = `%${filter}%`;
+    args.push(like, like, like);
+  }
+
+  const total = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${where}`).get(...args).n;
+  const rows = db.prepare(
+    `SELECT p.id      AS id,
+            v.name    AS vendor_name,
+            p.name    AS name,
+            p.aliases AS aliases,
+            p.notes   AS notes,
+            (SELECT COUNT(*) FROM document_products dp WHERE dp.product_id = p.id) AS docs
+     ${FROM} ${where}
+     ORDER BY v.name, p.name
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = ["id", "vendor_name", "name", "aliases", "notes", "docs"];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
+// Joined view of document_products. Replaces the raw two-int row with
+// readable names (same document_name treatment as the documents view —
+// extension stripped).
+function browseDocumentProducts(db, { limit, offset, filter }) {
+  const FROM = `
+    FROM document_products dp
+    JOIN documents d ON d.id = dp.document_id
+    JOIN files f     ON f.id = d.file_id
+    JOIN products p  ON p.id = dp.product_id
+    JOIN vendors v   ON v.id = p.vendor_id
+  `;
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = "WHERE f.name LIKE ? OR f.path LIKE ? OR p.name LIKE ? OR v.name LIKE ? OR (dp.source IS NOT NULL AND dp.source LIKE ?)";
+    const like = `%${filter}%`;
+    args.push(like, like, like, like, like);
+  }
+
+  const total = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${where}`).get(...args).n;
+  const rows = db.prepare(
+    `SELECT p.name          AS product_name,
+            v.name          AS vendor_name,
+            dp.document_id  AS document_id,
+            CASE
+              WHEN f.file_type IS NOT NULL
+                AND length(f.name) > length(f.file_type)
+                AND lower(substr(f.name, length(f.name) - length(f.file_type) + 1)) = f.file_type
+              THEN substr(f.name, 1, length(f.name) - length(f.file_type))
+              ELSE f.name
+            END             AS document_name,
+            dp.confidence   AS confidence,
+            dp.source       AS source,
+            f.path          AS file_path
+     ${FROM} ${where}
+     ORDER BY p.name, v.name, dp.document_id
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = [
+    "product_name", "vendor_name", "document_id", "document_name",
+    "confidence", "source", "file_path",
+  ];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
 // Single-extract fetch for the modal viewer. Returns text + metadata +
 // page count + the joined file info, but not pages_json (huge — leave
 // for future structured viewer).
@@ -380,7 +474,7 @@ function confidenceTiersAtOrAbove(threshold) {
 
 // Builds the FROM/WHERE/args triple shared by browseDocuments and handleStats.
 // Both endpoints filter the same way; only the SELECT and aggregation differ.
-function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters }) {
+function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter }) {
   const from = `
     FROM documents d
     JOIN files f          ON f.id = d.file_id
@@ -425,6 +519,22 @@ function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactCon
       clauses.push(`d.confidence IN (${placeholders})`);
       args.push(...allowedConfidences);
     }
+  }
+  // Product link membership. productFilter narrows to documents that link
+  // to a product with the given name; hasProductFilter narrows to docs
+  // with at least one (or zero) product links.
+  if (productFilter) {
+    clauses.push(
+      "EXISTS (SELECT 1 FROM document_products dp_f " +
+      "JOIN products p_f ON p_f.id = dp_f.product_id " +
+      "WHERE dp_f.document_id = d.id AND p_f.name = ?)",
+    );
+    args.push(productFilter);
+  }
+  if (hasProductFilter === "yes") {
+    clauses.push("EXISTS (SELECT 1 FROM document_products dp_f WHERE dp_f.document_id = d.id)");
+  } else if (hasProductFilter === "no") {
+    clauses.push("NOT EXISTS (SELECT 1 FROM document_products dp_f WHERE dp_f.document_id = d.id)");
   }
   const where = clauses.length ? "WHERE " + clauses.join(" AND ") : "";
   return { from, where, args };
@@ -504,6 +614,137 @@ function handleFileTypes() {
   }
 }
 
+// --- Ignored file types --------------------------------------------------
+// Extensions on this list get ingested into files but skip the documents
+// row, removing them from classification / charts / dashboard. Adding here
+// only affects future ingests — existing documents are left in place.
+// Re-ingest files to apply the list retroactively.
+
+function normalizeExt(raw) {
+  let s = String(raw || "").trim().toLowerCase();
+  if (!s) return null;
+  if (!s.startsWith(".")) s = "." + s;
+  // Reject anything that looks more like a path / has whitespace / has slashes.
+  if (!/^\.[a-z0-9]{1,12}$/i.test(s)) return null;
+  return s;
+}
+
+function handleListIgnoredTypes() {
+  const db = openDb();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT it.ext AS ext,
+                it.added_at AS added_at,
+                it.notes AS notes,
+                (SELECT COUNT(*) FROM files f
+                  WHERE f.is_dir = 0 AND f.file_type = it.ext) AS file_count
+         FROM ignored_file_types it
+         ORDER BY it.ext ASC`,
+      )
+      .all();
+    return { ok: true, types: rows };
+  } finally {
+    db.close();
+  }
+}
+
+function handleAddIgnoredType(body) {
+  const ext = normalizeExt(body.ext);
+  if (!ext) {
+    return { ok: false, error: "Invalid extension. Use a short alphanumeric like .tmp" };
+  }
+  const notes = (body.notes || "").trim() || null;
+  const db = openDb();
+  try {
+    db.prepare(
+      "INSERT OR IGNORE INTO ignored_file_types (ext, added_at, notes) VALUES (?, ?, ?)",
+    ).run(ext, new Date().toISOString(), notes);
+    return { ok: true, ext };
+  } finally {
+    db.close();
+  }
+}
+
+function handleRemoveIgnoredType(body) {
+  const ext = normalizeExt(body.ext);
+  if (!ext) return { ok: false, error: "Invalid extension." };
+  const db = openDb();
+  try {
+    const r = db.prepare("DELETE FROM ignored_file_types WHERE ext = ?").run(ext);
+    return { ok: true, ext, removed: Number(r.changes) };
+  } finally {
+    db.close();
+  }
+}
+
+// --- Ignored folders -----------------------------------------------------
+// Folder-name matches at ingest time. Folder + all descendants are dropped
+// from `files` (and therefore from documents/charts). Going-forward only.
+
+function normalizeFolderName(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return null;
+  // Reject anything with path separators or trailing slashes — this is an
+  // exact folder-name match, not a path glob.
+  if (/[\\/]/.test(s)) return null;
+  // Cap length to avoid garbage; allow letters, digits, spaces, common punctuation.
+  if (s.length > 128) return null;
+  return s;
+}
+
+function handleListIgnoredFolders() {
+  const db = openDb();
+  try {
+    // file_count: how many CURRENT rows in `files` sit at or under a folder
+    // segment whose name matches (case-insensitive). This counts files that
+    // *would* be excluded if we re-ingested today.
+    const folders = db.prepare("SELECT name, added_at, notes FROM ignored_folders ORDER BY name ASC").all();
+    const result = folders.map((f) => {
+      const like = "%\\" + f.name + "\\%";
+      const eqEnd = "%\\" + f.name;
+      const n = db.prepare(
+        `SELECT COUNT(*) AS n FROM files
+         WHERE LOWER(path) LIKE LOWER(?)
+            OR LOWER(path) LIKE LOWER(?)`,
+      ).get(like, eqEnd).n;
+      return { ...f, file_count: n };
+    });
+    return { ok: true, folders: result };
+  } finally {
+    db.close();
+  }
+}
+
+function handleAddIgnoredFolder(body) {
+  const name = normalizeFolderName(body.name);
+  if (!name) {
+    return { ok: false, error: "Invalid folder name. Use a plain folder name (no slashes)." };
+  }
+  const notes = (body.notes || "").trim() || null;
+  const db = openDb();
+  try {
+    db.prepare(
+      "INSERT OR IGNORE INTO ignored_folders (name, added_at, notes) VALUES (?, ?, ?)",
+    ).run(name, new Date().toISOString(), notes);
+    return { ok: true, name };
+  } finally {
+    db.close();
+  }
+}
+
+function handleRemoveIgnoredFolder(body) {
+  const name = normalizeFolderName(body.name);
+  if (!name) return { ok: false, error: "Invalid folder name." };
+  const db = openDb();
+  try {
+    const r = db.prepare("DELETE FROM ignored_folders WHERE name = ?").run(name);
+    return { ok: true, name, removed: Number(r.changes) };
+  } finally {
+    db.close();
+  }
+}
+
 // All document_types names. Counts come from the documents join — types
 // with zero documents still show in the list since they're real options.
 function handleDocumentTypeOptions() {
@@ -523,6 +764,75 @@ function handleDocumentTypeOptions() {
   }
 }
 
+// Whole-corpus snapshot for the Home dashboard. Returns per-table row counts
+// plus a per-document_type confidence breakdown. No filters — this is the
+// "overview" page, distinct from /api/stats which respects the table filters.
+function handleDashboard() {
+  const db = openDb();
+  try {
+    const counts = tableCounts(db);
+
+    const totalDocs = counts.documents;
+    const classifiedTotal = db
+      .prepare("SELECT COUNT(*) AS n FROM documents WHERE document_type_id IS NOT NULL")
+      .get().n;
+
+    // Per-doctype confidence breakdown. LEFT JOIN so types with zero documents
+    // still appear (count = 0); the client decides whether to dim/hide them.
+    const rows = db
+      .prepare(
+        `SELECT dt.name AS name,
+                COUNT(d.id)                                              AS total,
+                SUM(CASE WHEN d.confidence = 'high'   THEN 1 ELSE 0 END) AS high,
+                SUM(CASE WHEN d.confidence = 'medium' THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN d.confidence = 'low'    THEN 1 ELSE 0 END) AS low
+         FROM document_types dt
+         LEFT JOIN documents d ON d.document_type_id = dt.id
+         GROUP BY dt.id, dt.name
+         ORDER BY total DESC, dt.name ASC`,
+      )
+      .all();
+
+    const byType = rows.map((r) => {
+      const total = Number(r.total) || 0;
+      const high = Number(r.high) || 0;
+      const medium = Number(r.medium) || 0;
+      const low = Number(r.low) || 0;
+      // (A) share of all classified documents that landed in this type.
+      const pctOfClassified = classifiedTotal > 0 ? (total / classifiedTotal) * 100 : 0;
+      // (B) confidence mix within this type. Sums to 100 when total > 0.
+      const pctHigh   = total > 0 ? (high   / total) * 100 : 0;
+      const pctMedium = total > 0 ? (medium / total) * 100 : 0;
+      const pctLow    = total > 0 ? (low    / total) * 100 : 0;
+      return {
+        name: r.name,
+        total, high, medium, low,
+        pctOfClassified, pctHigh, pctMedium, pctLow,
+      };
+    });
+
+    const ignored = {
+      types:   db.prepare("SELECT COUNT(*) AS n FROM ignored_file_types").get().n,
+      folders: db.prepare("SELECT COUNT(*) AS n FROM ignored_folders").get().n,
+    };
+
+    return {
+      ok: true,
+      counts,
+      classification: {
+        totalDocuments: totalDocs,
+        classified: classifiedTotal,
+        unclassified: totalDocs - classifiedTotal,
+        pctClassified: totalDocs > 0 ? (classifiedTotal / totalDocs) * 100 : 0,
+      },
+      ignored,
+      byType,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function handleStats(body = {}) {
   const filterArgs = {
     filter:              body.filter || "",
@@ -531,6 +841,8 @@ function handleStats(body = {}) {
     exactConfidence:     body.exactConfidence || "",
     fileTypeFilters:     Array.isArray(body.fileTypeFilters) ? body.fileTypeFilters : [],
     documentTypeFilters: Array.isArray(body.documentTypeFilters) ? body.documentTypeFilters : [],
+    productFilter:       body.productFilter || "",
+    hasProductFilter:    body.hasProductFilter || "",
   };
   const { from, where, args } = buildDocumentsWhere(filterArgs);
 
@@ -585,6 +897,53 @@ function handleStats(body = {}) {
     const byDocumentTypeTop = dtRows.slice(0, TOP_N).map((r) => ({ dtype: r.dtype, n: r.n }));
     const byDocumentTypeOther = dtRows.slice(TOP_N).map((r) => ({ dtype: r.dtype, n: r.n }));
 
+    // --- Product-related aggregates -------------------------------------
+    // (a) Top products by document count, scoped to the filter chain.
+    //     Reuses buildDocumentsWhere's FROM/WHERE/args (aliases d/f/v/dt
+    //     already defined) and tacks document_products + products + a
+    //     second vendor alias on top.
+    const PRODUCT_TOP_N = 20;
+    const productRows = db
+      .prepare(
+        `SELECT pp.id        AS product_id,
+                pp.name      AS product_name,
+                pv.name      AS vendor_name,
+                COUNT(*)     AS n
+         ${from}
+         JOIN document_products dp ON dp.document_id = d.id
+         JOIN products pp           ON pp.id = dp.product_id
+         JOIN vendors  pv           ON pv.id = pp.vendor_id
+         ${where}
+         GROUP BY pp.id ORDER BY n DESC`,
+      )
+      .all(...args);
+    const byProductTop   = productRows.slice(0, PRODUCT_TOP_N).map(
+      (r) => ({ product: r.product_name, vendor: r.vendor_name, n: r.n }));
+    const byProductOther = productRows.slice(PRODUCT_TOP_N).map(
+      (r) => ({ product: r.product_name, vendor: r.vendor_name, n: r.n }));
+
+    // (b) Distinct products discovered per vendor — informational chart.
+    //     Counts how many product rows each vendor has in the products
+    //     table (independent of doc-link counts).
+    const productsPerVendor = db
+      .prepare(
+        `SELECT v.name AS vendor, COUNT(DISTINCT p.id) AS n
+         FROM products p JOIN vendors v ON v.id = p.vendor_id
+         GROUP BY v.id ORDER BY n DESC, v.name ASC LIMIT 30`,
+      )
+      .all();
+
+    // (c) Coverage: how many of the (filtered) documents have at least
+    //     one product link vs. zero. Subject to the same filter chain.
+    const docsWithProducts = db
+      .prepare(
+        `SELECT COUNT(DISTINCT d.id) AS n ${from} ${where}` +
+          (where ? " AND" : " WHERE") +
+          " EXISTS (SELECT 1 FROM document_products dp WHERE dp.document_id = d.id)",
+      )
+      .get(...args).n;
+    const docsWithoutProducts = total - docsWithProducts;
+
     return {
       ok: true,
       total,
@@ -595,6 +954,11 @@ function handleStats(body = {}) {
       byFileTypeOther,
       byDocumentTypeTop,
       byDocumentTypeOther,
+      byProductTop,
+      byProductOther,
+      productsPerVendor,
+      docsWithProducts,
+      docsWithoutProducts,
       totalFiles: extRows.reduce((a, r) => a + r.n, 0),
       activeFilter: filterArgs,
     };
@@ -636,12 +1000,17 @@ async function handleOpenFile(body) {
   const { spawn } = await import("node:child_process");
   try {
     if (process.platform === "win32") {
-      // `start` is a cmd builtin, not a separate exe. The empty string is
-      // the window title (start treats the first quoted arg as title).
-      const child = spawn("cmd.exe", ["/c", "start", "", localPath], {
+      // `start` is a cmd builtin, not a separate exe. cmd parses the line
+      // before start sees it, so any `& | < > ( ) ^ %` in the path becomes
+      // a metacharacter and the open silently breaks. Escape with `^` and
+      // wrap in quotes; the empty "" is start's window-title slot (start
+      // treats the first quoted arg as the title).
+      const cmdEscaped = localPath.replace(/[&|<>()^%]/g, "^$&");
+      const line = `start "" "${cmdEscaped}"`;
+      const child = spawn("cmd.exe", ["/c", line], {
         detached: true,
         stdio: "ignore",
-        windowsVerbatimArguments: false,
+        windowsVerbatimArguments: true,
       });
       child.unref();
     } else if (process.platform === "darwin") {
@@ -696,6 +1065,51 @@ function generateBasicListing(folder) {
   const dest = path.join(folder, "basic_listing.txt");
   fs.writeFileSync(dest, lines.join("\n") + "\n", "utf8");
   return { path: dest, lineCount: lines.length };
+}
+
+// Force-regenerate a folder's basic_listing.txt by deleting the existing
+// file and walking the folder again. Used by the "Rescan listing" button —
+// keeps the path the user already chose, just refreshes its contents.
+function handleRescanListing(body) {
+  const folder = (body.folder || "").trim();
+  if (!folder) return { ok: false, error: "Missing folder." };
+  let stat;
+  try { stat = fs.statSync(folder); }
+  catch (e) { return { ok: false, error: "Cannot access: " + folder + " (" + e.code + ")" }; }
+  if (!stat.isDirectory()) return { ok: false, error: "Not a directory: " + folder };
+
+  const existing = path.join(folder, "basic_listing.txt");
+  let deleted = false;
+  if (fs.existsSync(existing)) {
+    try {
+      fs.unlinkSync(existing);
+      deleted = true;
+    } catch (e) {
+      return { ok: false, error: "Could not delete existing listing: " + e.message };
+    }
+  }
+
+  let result;
+  try {
+    result = generateBasicListing(folder);
+  } catch (e) {
+    return { ok: false, error: "Generation failed: " + e.message };
+  }
+
+  // Keep the open-file remap pointing at this folder (matches choose-folder).
+  PATH_REMAPS.length = 0;
+  PATH_REMAPS.push({
+    from: "S:\\vendors\\",
+    to: folder.endsWith("\\") || folder.endsWith("/") ? folder : folder + "\\",
+  });
+
+  return {
+    ok: true,
+    folder,
+    listingPath: result.path,
+    lineCount: result.lineCount,
+    deletedExisting: deleted,
+  };
 }
 
 // Resolve a chosen folder to a listing file: use the existing
@@ -863,10 +1277,83 @@ function handleClassify() {
   }
 }
 
+// Purge filesystem text backups for the currently-loaded corpus.
+// Same vendors-segment heuristic the extractor uses: find each unique
+// "vendors"-named segment across files.path, walk up to its parent dir,
+// then delete the sibling whose name is "<segment>_text". Best-effort —
+// missing folders are skipped, errors are reported but don't abort.
+function handlePurgeTextBackups() {
+  const db = openDb();
+  const targets = new Set();
+  try {
+    const rows = db.prepare(
+      "SELECT DISTINCT path FROM files WHERE is_dir = 0 LIMIT 5000",
+    ).all();
+    for (const r of rows) {
+      // Map canonical paths through PATH_REMAPS to local form first, since
+      // the backup folder lives next to the actual on-disk vendors dir.
+      const local = remapPath(r.path);
+      const target = backupRootFor(local);
+      if (target) targets.add(target);
+    }
+  } finally {
+    db.close();
+  }
+
+  const results = [];
+  for (const target of targets) {
+    if (!fs.existsSync(target)) {
+      results.push({ path: target, status: "missing" });
+      continue;
+    }
+    try {
+      // Sanity: refuse to delete anything that doesn't end with _text.
+      // Belt-and-braces against a future bug in backupRootFor.
+      if (!/_text$/i.test(target)) {
+        results.push({ path: target, status: "skipped: name does not end with _text" });
+        continue;
+      }
+      fs.rmSync(target, { recursive: true, force: true });
+      results.push({ path: target, status: "deleted" });
+    } catch (e) {
+      results.push({ path: target, status: "error: " + e.message });
+    }
+  }
+
+  return { ok: true, targets: results, count: results.length };
+}
+
+// Compute the backup-tree root from a local file path. Mirrors the
+// extractor's per-file mapping but truncates at the renamed segment.
+//   in:  C:\data\PyroCommData\PyroCommSubset\Vendors\Notifier\foo.pdf
+//   out: C:\data\PyroCommData\PyroCommSubset\Vendors_text
+function backupRootFor(localPath) {
+  if (!localPath) return null;
+  const parts = localPath.split(/[\\/]/);
+  const idx = parts.findIndex((p) => p.toLowerCase() === "vendors");
+  if (idx < 0) return null;
+  const newParts = parts.slice(0, idx + 1);
+  newParts[idx] = parts[idx] + "_text";
+  const sep = localPath.includes("\\") ? "\\" : "/";
+  return newParts.join(sep);
+}
+
 function handleClassifyByContent() {
   const db = openDb();
   try {
     const result = classifyAllByContent(db);
+    return { ok: true, ...result, counts: tableCounts(db) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    db.close();
+  }
+}
+
+function handleClassifyProducts() {
+  const db = openDb();
+  try {
+    const result = classifyAllByProduct(db);
     return { ok: true, ...result, counts: tableCounts(db) };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -914,29 +1401,47 @@ function handlePurge(body) {
   const db = openDb();
   try {
     if (target === "all") {
-      // documents cascades from files via ON DELETE CASCADE; document_types
-      // is intentionally preserved (one-time taxonomy snapshot).
+      // Order matters: child tables first to satisfy FK constraints.
+      //   files     → cascades to documents, document_extracts, document_products
+      //   products  → owned by vendors via FK; clear before deleting vendors
+      //   vendors   → safe to delete once products is empty
+      // Intentionally preserved:
+      //   document_types     one-time taxonomy snapshot, no reason to reseed
+      //   ignored_file_types user-curated ingest config, survives data wipes
+      //   ignored_folders    user-curated ingest config, survives data wipes
       db.exec("DELETE FROM files");
+      db.exec("DELETE FROM products");
       db.exec("DELETE FROM vendors");
       db.exec(
-        "DELETE FROM sqlite_sequence WHERE name IN ('vendors', 'files', 'documents')",
+        "DELETE FROM sqlite_sequence WHERE name IN " +
+        "('vendors', 'files', 'documents', 'products')",
       );
       return { ok: true, target, counts: tableCounts(db) };
     }
     if (target === "files") {
-      // Cascade wipes documents too.
+      // Cascade wipes documents → document_extracts → document_products.
+      // products and vendors are independent of files, so they stay.
       db.exec("DELETE FROM files");
       db.exec("DELETE FROM sqlite_sequence WHERE name IN ('files', 'documents')");
       return { ok: true, target, counts: tableCounts(db) };
     }
     if (target === "vendors") {
-      const filesCount = db.prepare("SELECT COUNT(*) AS n FROM files").get().n;
+      const filesCount    = db.prepare("SELECT COUNT(*) AS n FROM files").get().n;
+      const productsCount = db.prepare("SELECT COUNT(*) AS n FROM products").get().n;
       if (filesCount > 0) {
         return {
           ok: false,
           error:
             `Cannot purge vendors while files has ${filesCount} rows ` +
             `(FK constraint). Purge files first, or use "Purge ALL".`,
+        };
+      }
+      if (productsCount > 0) {
+        return {
+          ok: false,
+          error:
+            `Cannot purge vendors while products has ${productsCount} rows ` +
+            `(FK constraint). Purge products first, or use "Purge ALL".`,
         };
       }
       db.exec("DELETE FROM vendors");
@@ -993,6 +1498,13 @@ const PAGE = String.raw`<!DOCTYPE html>
   }
   header h1 { font-size: 14px; font-weight: 600; margin: 0; color: var(--accent); }
   header .meta { font-size: 12px; color: var(--muted); }
+  header .spacer { flex: 1; }
+  header a.help-link {
+    font-size: 12px; color: var(--accent); text-decoration: none;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset);
+  }
+  header a.help-link:hover { background: var(--hover); border-color: var(--accent); }
   main { flex: 1; display: flex; min-height: 0; }
   aside {
     width: 280px; border-right: 1px solid var(--border);
@@ -1030,6 +1542,32 @@ const PAGE = String.raw`<!DOCTYPE html>
   aside .table-row:hover { background: var(--hover); }
   aside .table-row.active { background: var(--accent-bg); color: var(--text); }
   aside .table-row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Compact 2-col summary table used inside the Source data section to show
+     document_types / ignored types / ignored folders with their counts. Each
+     row behaves like a .table-row (hover, active highlight, click). */
+  aside table.sidebar-summary {
+    width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px;
+  }
+  aside table.sidebar-summary tr { cursor: pointer; }
+  aside table.sidebar-summary tr:hover td { background: var(--hover); }
+  aside table.sidebar-summary tr.active td { background: var(--accent-bg); color: var(--text); }
+  aside table.sidebar-summary td {
+    padding: 6px 8px; border-radius: 4px;
+  }
+  aside table.sidebar-summary td.count {
+    color: var(--muted); font-variant-numeric: tabular-nums;
+    text-align: right; width: 40px;
+  }
+  /* Chart-preset shortcut links sit under "📊 All documents" and apply a
+     pre-built filter chain when clicked. Lightly muted + slightly smaller
+     so the parent (📊 All documents) stays visually primary. */
+  aside .chart-preset {
+    padding: 4px 8px 4px 24px; cursor: pointer; border-radius: 4px;
+    font-size: 12px; color: var(--muted);
+  }
+  aside .chart-preset:hover { background: var(--hover); color: var(--text); }
+  aside .chart-preset.active { background: var(--accent-bg); color: var(--text); }
   aside label { display: block; font-size: 12px; color: var(--muted); margin: 6px 0 3px 0; }
   aside input[type=text] {
     width: 100%; padding: 5px 7px; font-size: 12px;
@@ -1155,6 +1693,31 @@ const PAGE = String.raw`<!DOCTYPE html>
   aside button.secondary { background: var(--inset); border-color: var(--border); color: var(--text); }
   aside button.secondary:hover { background: var(--hover); }
   aside button:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* Progress-fill: button background becomes a sharp left-to-right split
+     between accent (filled) and inset (unfilled) at --progress percent.
+     Used by the extract button to show overall corpus progress while the
+     worker runs. Disabled state stays vivid so the bar reads clearly. */
+  aside button.progress-fill {
+    background: linear-gradient(
+      to right,
+      var(--accent) 0%,
+      var(--accent) var(--progress, 0%),
+      var(--inset) var(--progress, 0%),
+      var(--inset) 100%
+    );
+    color: var(--text);
+    border-color: var(--accent);
+    opacity: 1;
+    cursor: progress;
+    position: relative;
+    overflow: hidden;
+  }
+  /* Force the label to sit above the gradient and stay readable on either
+     side of the boundary. White-on-accent / dark-on-inset contrast comes
+     from a text-shadow that smears either way. */
+  aside button.progress-fill {
+    text-shadow: 0 0 2px var(--bg);
+  }
   section.content { flex: 1; padding: 12px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
   .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .toolbar input {
@@ -1280,66 +1843,333 @@ const PAGE = String.raw`<!DOCTYPE html>
     text-underline-offset: 2px; cursor: pointer;
   }
   tbody td a.open-link:hover { color: var(--accent); text-decoration-color: var(--accent); }
-  #log {
-    margin-top: 8px; padding: 8px 10px; max-height: 120px; overflow-y: auto;
-    font-size: 12px; font-family: monospace;
+  #log-wrap {
+    margin-top: 8px;
     background: var(--inset); border: 1px solid var(--border); border-radius: 3px;
+  }
+  #log-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 8px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    user-select: none;
+  }
+  #log-header:hover { color: var(--text); }
+  #log-header .caret { font-size: 10px; transition: transform 0.15s; }
+  #log-wrap.collapsed #log-header { border-bottom: none; }
+  #log-wrap.collapsed #log-header .caret { transform: rotate(-90deg); }
+  #log-wrap.collapsed #log { display: none; }
+  #log {
+    padding: 8px 10px; max-height: 120px; overflow-y: auto;
+    font-size: 12px; font-family: monospace;
   }
   #log .entry { margin: 0 0 2px 0; }
   #log .entry.ok { color: var(--ok); }
   #log .entry.err { color: var(--error-text); }
   #log .entry.info { color: var(--muted); }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* Collapsible sidebar sections. <summary> acts as the section header
+     (mirroring the existing h2 styling) and clicking toggles the body. */
+  aside details {
+    margin: 14px 0 0 0;
+  }
+  aside details > summary {
+    list-style: none;
+    cursor: pointer;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted); margin: 0 0 6px 0;
+    user-select: none;
+    display: flex; align-items: center; gap: 6px;
+  }
+  aside details > summary::-webkit-details-marker { display: none; }
+  aside details > summary::before {
+    content: "▸";
+    font-size: 9px;
+    transition: transform 0.1s;
+    display: inline-block;
+    width: 10px;
+  }
+  aside details[open] > summary::before { transform: rotate(90deg); }
+  aside details > summary:hover { color: var(--text); }
+  /* "Full Process" gets its own visual distinction — it's the headline
+     action, runs the whole pipeline. */
+  aside button.headline {
+    background: var(--accent); color: var(--bg);
+    border-color: var(--accent); font-weight: 600;
+  }
+  aside button.headline:hover { background: var(--accent-bg); color: var(--accent); }
+
+  /* Click-to-open menus (Purge, Ingest). The trigger looks like an aside
+     button; the panel pops out below and floats above following content. */
+  aside .menu-wrap { position: relative; }
+  aside .menu-trigger {
+    width: 100%; padding: 7px; margin-top: 5px; font-size: 12px;
+    background: var(--inset); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px;
+    cursor: pointer; text-align: left;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  aside .menu-trigger:hover { background: var(--hover); border-color: var(--accent); }
+  aside .menu-trigger.open  { background: var(--hover); border-color: var(--accent); }
+  aside .menu-trigger .caret { color: var(--muted); font-size: 10px; }
+  aside .menu-panel {
+    position: absolute; top: 100%; left: 0; right: 0;
+    margin-top: 2px; padding: 4px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 3px;
+    z-index: 60;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  }
+  aside .menu-item {
+    padding: 6px 10px; cursor: pointer; border-radius: 3px;
+    font-size: 12px; color: var(--text);
+  }
+  aside .menu-item:hover { background: var(--hover); }
+  aside .menu-item.danger { color: var(--danger-text); }
+  aside .menu-item.danger:hover { background: var(--danger); color: #fff; }
+  aside .menu-item.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+  /* Inline action menu inside the sidebar. Outer details is the "Actions"
+     section; nested details.action-sub are the three groups (Purge /
+     Ingest / Classify & Extract). Action rows look the same in any group. */
+  aside details.action-sub { margin: 4px 0 4px 12px; }
+  aside details.action-sub > summary {
+    padding: 4px 6px; border-radius: 3px;
+    text-transform: none; letter-spacing: 0; font-size: 12px;
+    color: var(--text);
+  }
+  aside details.action-sub > summary:hover { background: var(--hover); }
+  aside .action-row {
+    padding: 6px 8px 6px 26px; cursor: pointer; border-radius: 3px;
+    font-size: 12px; color: var(--text);
+  }
+  aside .action-row:hover { background: var(--hover); }
+  aside .action-row.danger { color: var(--danger-text); }
+  aside .action-row.danger:hover { background: var(--danger); color: #fff; }
+  aside .action-row.headline { color: var(--accent); font-weight: 600; }
+  aside .action-row.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+  aside .action-row .desc {
+    display: block; color: var(--muted); font-size: 10px; font-weight: normal; margin-top: 2px;
+  }
+  aside .action-row.danger:hover .desc { color: rgba(255,255,255,0.85); }
+  /* Progress fill on the Extracted status line: linear gradient with a
+     hard stop at --progress so the row reads as a 0-100% bar. */
+  .extract-status.with-progress {
+    background: linear-gradient(
+      to right,
+      var(--accent) 0%,
+      var(--accent) var(--progress, 0%),
+      var(--inset) var(--progress, 0%),
+      var(--inset) 100%
+    );
+    color: var(--bg);
+    border-color: var(--accent);
+    text-shadow: 0 0 2px rgba(0,0,0,0.2);
+  }
+  /* Home dashboard — counts grid + per-type classification breakdown.
+     Lives at the top of #help-view, above the help prose. */
+  #dashboard { margin-bottom: 32px; }
+  #dashboard h2.dash-h {
+    color: var(--accent); margin: 0 0 14px 0; font-size: 22px;
+  }
+  #dashboard h3.dash-h {
+    color: var(--accent); margin: 22px 0 10px 0; font-size: 17px;
+  }
+  #dashboard .dash-sub {
+    color: var(--muted); font-size: 12px; margin: -6px 0 12px 0;
+  }
+  #dash-counts {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px; margin-bottom: 8px;
+  }
+  #dash-counts .dash-card {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px;
+  }
+  #dash-counts .dash-card .label {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  #dash-counts .dash-card .value {
+    color: var(--text); font-size: 22px; font-weight: 600; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  #dash-class-summary {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px; margin-bottom: 6px;
+    font-size: 13px; color: var(--text);
+  }
+  #dash-class-summary strong { color: var(--accent); }
+  table.dash-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  table.dash-table th, table.dash-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 6px 8px; text-align: right;
+  }
+  table.dash-table th:first-child, table.dash-table td:first-child {
+    text-align: left;
+  }
+  table.dash-table th {
+    color: var(--muted); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    background: var(--inset);
+  }
+  table.dash-table td.zero { color: var(--muted); }
+  table.dash-table td.pct { color: var(--muted); font-size: 11px; }
+  table.dash-table tr.empty-type td { color: var(--muted); opacity: 0.55; }
+
+  /* Help / welcome page styling. Readable prose, not a data grid. */
+  #help-view { max-width: 760px; }
+  #help-view .help-h {
+    color: var(--accent); margin: 24px 0 8px 0; font-size: 17px;
+  }
+  #help-view .help-h:first-child { margin-top: 0; font-size: 22px; }
+  #help-view .help-p {
+    line-height: 1.55; margin: 0 0 12px 0; font-size: 14px;
+  }
+  #help-view .help-ol, #help-view .help-ul {
+    line-height: 1.55; margin: 0 0 14px 20px; font-size: 14px;
+  }
+  #help-view .help-ol li, #help-view .help-ul li { margin: 4px 0; }
+  #help-view code {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 5px; font-size: 12px;
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>EnLogosGRAG</h1>
   <span class="meta" id="status">loading…</span>
+  <span class="spacer"></span>
+  <a class="help-link" href="/help" target="_blank" rel="noopener">Help</a>
 </header>
 <main>
   <aside id="sidebar">
     <button id="sidebar-toggle" type="button" title="Collapse sidebar">‹</button>
-    <h2>Views</h2>
-    <div id="charts-row" class="table-row" data-view="charts">
-      <span>📊 Charts</span>
+    <div id="help-row" class="table-row" data-view="help">
+      <span>🏠 Home</span>
     </div>
-
-    <h2>Tables</h2>
-    <div id="table-list"></div>
-
-    <h2>Source listing</h2>
-    <div id="listing-display">
-      <div id="listing-display-empty" class="listing-empty">No folder chosen.</div>
-      <div id="listing-display-set" class="listing-set" style="display:none;">
-        <div class="listing-name" id="listing-name"></div>
-        <div class="listing-path" id="listing-path"></div>
+    <details open>
+      <summary>Charts</summary>
+      <div id="charts-row" class="table-row" data-view="charts">
+        <span>📊 All documents</span>
       </div>
-    </div>
-    <button id="pick-listing" class="secondary">Choose folder…</button>
+      <div class="chart-preset" data-preset="classified">
+        <span>↳ Classified only</span>
+      </div>
+      <div class="chart-preset" data-preset="unclassified">
+        <span>↳ Unclassified only</span>
+      </div>
+      <div class="chart-preset" data-preset="pdfs">
+        <span>↳ PDFs only</span>
+      </div>
+      <div class="chart-preset" data-preset="classified-pdfs">
+        <span>↳ Classified PDFs only</span>
+      </div>
+      <div class="chart-preset" data-preset="unclassified-pdfs">
+        <span>↳ Unclassified PDFs only</span>
+      </div>
+      <div class="chart-preset" data-preset="with-products">
+        <span>↳ Documents with products</span>
+      </div>
+      <div class="chart-preset" data-preset="without-products">
+        <span>↳ Documents without products</span>
+      </div>
+    </details>
 
-    <h2>Ingest</h2>
-    <button id="run-vendors">Run vendors ingest</button>
-    <button id="run-files">Run files ingest</button>
-    <button id="run-full">Full Run (vendors + files)</button>
+    <details open>
+      <summary>Tables</summary>
+      <div id="table-list"></div>
+    </details>
 
-    <h2>Classify</h2>
-    <div id="classify-status" class="extract-status">Classified: …</div>
-    <button id="classify-all">Classify all files (filename rules)</button>
-    <button id="classify-by-content">Classify by extract content (low/none only)</button>
+    <details>
+      <summary>Source data</summary>
+      <div id="listing-display">
+        <div id="listing-display-empty" class="listing-empty">No folder chosen.</div>
+        <div id="listing-display-set" class="listing-set" style="display:none;">
+          <div class="listing-name" id="listing-name"></div>
+          <div class="listing-path" id="listing-path"></div>
+        </div>
+      </div>
+      <button id="pick-listing" class="secondary">Choose folder…</button>
+      <button id="rescan-listing" class="secondary">Rescan listing (regenerate basic_listing.txt)</button>
+      <table class="sidebar-summary">
+        <tbody>
+          <tr id="doctypes-row" data-table="document_types">
+            <td>📚 Document types</td>
+            <td class="count" id="doctypes-count">0</td>
+          </tr>
+          <tr id="ignored-row" data-view="ignored">
+            <td>🚫 Ignored types</td>
+            <td class="count" id="ignored-types-count">0</td>
+          </tr>
+          <tr id="ignored-folders-row" data-view="ignored-folders">
+            <td>📁 Ignored folders</td>
+            <td class="count" id="ignored-folders-count">0</td>
+          </tr>
+        </tbody>
+      </table>
+    </details>
 
-    <h2>Extract</h2>
-    <div id="extract-status" class="extract-status">Extracted: …</div>
-    <button id="extract-start">Extract PDF text (background)</button>
-    <button id="extract-stop" class="secondary" style="display:none;">Stop extraction</button>
+    <details>
+      <summary>Actions</summary>
+      <details class="action-sub">
+        <summary>Purge</summary>
+        <div class="action-row danger" data-action="purge-vendors">Purge vendors</div>
+        <div class="action-row danger" data-action="purge-files">Purge files</div>
+        <div class="action-row danger" data-action="purge-all">Purge ALL tables</div>
+        <div class="action-row danger" data-action="purge-text-backups">
+          Purge text backups
+          <span class="desc">Delete the &lt;Vendors&gt;_text filesystem cache</span>
+        </div>
+      </details>
+      <details class="action-sub">
+        <summary>Ingest</summary>
+        <div class="action-row headline" data-action="run-full-process">
+          Full Process
+          <span class="desc">Vendors + files + classify + extract + content classify</span>
+        </div>
+        <div class="action-row" data-action="run-vendors">Run vendors ingest</div>
+        <div class="action-row" data-action="run-files">Run files ingest</div>
+        <div class="action-row" data-action="run-full">Full Run (vendors + files)</div>
+      </details>
+      <details class="action-sub">
+        <summary>Classify &amp; Extract</summary>
+        <div class="action-row" data-action="classify-all">
+          Classify all files
+          <span class="desc">Filename / path rules</span>
+        </div>
+        <div class="action-row" data-action="extract-start">
+          Extract PDF text
+          <span class="desc">Background; uses filesystem cache when present</span>
+        </div>
+        <div class="action-row" data-action="extract-stop">
+          Stop extraction
+          <span class="desc">Signals the worker to stop after current file</span>
+        </div>
+        <div class="action-row" data-action="classify-by-content">
+          Classify by extract content
+          <span class="desc">PDF-text rules; only fills empty / upgrades low</span>
+        </div>
+        <div class="action-row" data-action="classify-products">
+          Classify products
+          <span class="desc">Vendor-scoped rules; many-to-many to documents</span>
+        </div>
+      </details>
+    </details>
 
-    <h2>Purge</h2>
-    <button id="purge-vendors" class="danger">Purge vendors</button>
-    <button id="purge-files" class="danger">Purge files</button>
-    <button id="purge-all" class="danger">Purge ALL tables</button>
-
-    <h2>&nbsp;</h2>
-    <button id="refresh" class="secondary">Refresh status</button>
+    <details open>
+      <summary>Status</summary>
+      <button id="refresh" class="secondary">Refresh status</button>
+      <div id="classify-status" class="extract-status">Classified: …</div>
+      <div id="extract-status" class="extract-status">Extracted: …</div>
+      <button id="extract-stop" class="secondary" style="display:none; margin-top: 4px;">Stop extraction</button>
+    </details>
   </aside>
   <section class="content">
     <div class="toolbar">
@@ -1373,6 +2203,92 @@ const PAGE = String.raw`<!DOCTYPE html>
     </div>
     <div id="table-view" class="table-wrap">
       <table id="data-table"><thead></thead><tbody></tbody></table>
+    </div>
+    <div id="help-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <div id="dashboard">
+        <h2 class="dash-h">Dashboard</h2>
+        <p class="dash-sub" id="dash-empty" style="display:none;">No data yet. Run an ingest to populate the database.</p>
+
+        <h3 class="dash-h">Record counts</h3>
+        <div id="dash-counts"></div>
+
+        <h3 class="dash-h">Classification by document type</h3>
+        <div id="dash-class-summary">…</div>
+        <p class="dash-sub">% of classified shows each type's share of the classified corpus. High/Medium/Low show the confidence mix within that type (each row sums to 100%). Unclassified documents have no type and don't appear here — see the summary above for the corpus-wide unclassified count.</p>
+        <table class="dash-table" id="dash-types-table">
+          <thead>
+            <tr>
+              <th>Document type</th>
+              <th>Count</th>
+              <th>% of classified</th>
+              <th>High</th>
+              <th>Medium</th>
+              <th>Low</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="ignored-view" style="display:none; flex:1; overflow:auto; padding:24px 32px; max-width: 760px;">
+      <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Ignored file types</h2>
+      <p class="dash-sub" style="color: var(--muted); font-size: 12px; margin: 0 0 16px 0;">
+        Extensions on this list are ingested into the <code>files</code> table but skipped for classification, charts and the dashboard.
+        Adding here only affects future ingests — existing rows for an extension keep their classifications until you re-run files ingest.
+      </p>
+
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 18px;">
+        <input id="ignored-input" type="text" placeholder=".ext (e.g. .tmp)"
+               style="flex:0 0 180px; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset);">
+        <input id="ignored-notes" type="text" placeholder="optional notes"
+               style="flex:1; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset);">
+        <button id="ignored-add" class="secondary" style="padding: 5px 12px;">Add</button>
+      </div>
+
+      <table class="dash-table" id="ignored-table">
+        <thead>
+          <tr>
+            <th>Extension</th>
+            <th>Files matching (current)</th>
+            <th>Notes</th>
+            <th>Added</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5" style="color: var(--muted); text-align:center; padding: 18px;">No ignored types yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="ignored-folders-view" style="display:none; flex:1; overflow:auto; padding:24px 32px; max-width: 760px;">
+      <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Ignored folders</h2>
+      <p class="dash-sub" style="color: var(--muted); font-size: 12px; margin: 0 0 16px 0;">
+        Folder names listed here are dropped at ingest time — the folder itself <strong>and every descendant</strong> are excluded from the <code>files</code> table entirely. Match is exact and case-insensitive against any segment of the path.
+        Going-forward only — adding here doesn't delete existing rows. Re-run files ingest to apply.
+      </p>
+
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 18px;">
+        <input id="ignored-folders-input" type="text" placeholder="folder name (e.g. _archive)"
+               style="flex:0 0 220px; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset);">
+        <input id="ignored-folders-notes" type="text" placeholder="optional notes"
+               style="flex:1; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset);">
+        <button id="ignored-folders-add" class="secondary" style="padding: 5px 12px;">Add</button>
+      </div>
+
+      <table class="dash-table" id="ignored-folders-table">
+        <thead>
+          <tr>
+            <th>Folder name</th>
+            <th>Rows under (current)</th>
+            <th>Notes</th>
+            <th>Added</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5" style="color: var(--muted); text-align:center; padding: 18px;">No ignored folders yet.</td></tr>
+        </tbody>
+      </table>
     </div>
     <div id="chart-view" style="display:none; flex:1; overflow:auto; padding:14px;">
       <div id="chart-breadcrumb" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
@@ -1409,9 +2325,27 @@ const PAGE = String.raw`<!DOCTYPE html>
           <h3>Other document types</h3>
           <div class="chart-box"><canvas id="chart-doctype-other"></canvas></div>
         </div>
+        <div class="chart-card" id="card-product-coverage">
+          <h3>Documents with products</h3>
+          <div class="chart-box"><canvas id="chart-product-coverage"></canvas></div>
+        </div>
+        <div class="chart-card" id="card-products-top">
+          <h3>By product (top 20)</h3>
+          <div class="chart-box"><canvas id="chart-products-top"></canvas></div>
+        </div>
+        <div class="chart-card" id="card-products-vendor">
+          <h3>Products discovered per vendor</h3>
+          <div class="chart-box"><canvas id="chart-products-vendor"></canvas></div>
+        </div>
       </div>
     </div>
-    <div id="log"></div>
+    <div id="log-wrap">
+      <div id="log-header" title="Click to collapse/expand">
+        <span>Log</span>
+        <span class="caret">▾</span>
+      </div>
+      <div id="log"></div>
+    </div>
   </section>
 </main>
 
@@ -1429,6 +2363,8 @@ const state = {
   exactConfidence: "",      // set by drilldown click; wins over minConfidence
   fileTypeFilters: [],      // multi-select: ['.pdf', '.dwg', …]
   documentTypeFilters: [],  // multi-select: ['installation_manual', …]
+  productFilter: "",        // single-select: 'NFS2-3030' (chart drilldown)
+  hasProductFilter: "",     // 'yes' | 'no' | '' — chart drilldown only
   total: 0,
   // Chart-page drilldown filter chain. Independent from the table filters
   // above — switching to charts clears it. Drilldowns compose into this.
@@ -1437,6 +2373,8 @@ const state = {
     exactConfidence: "",
     fileTypeFilters: [],
     documentTypeFilters: [],
+    productFilter: "",
+    hasProductFilter: "",
   },
 };
 
@@ -1467,6 +2405,8 @@ function setActiveTable(name) {
   state.exactConfidence = "";
   state.fileTypeFilters = [];
   state.documentTypeFilters = [];
+  state.productFilter = "";
+  state.hasProductFilter = "";
   document.getElementById("filter").value = "";
   document.getElementById("classified-filter").value = "all";
   document.getElementById("confidence-filter").value = "all";
@@ -1478,6 +2418,7 @@ function setActiveTable(name) {
       el.dataset.table === name && el.dataset.view !== "charts");
   });
   document.getElementById("charts-row").classList.remove("active");
+  document.querySelectorAll(".chart-preset").forEach((el) => el.classList.remove("active"));
   // Visibility of per-table controls.
   // docs-only: classified + confidence dropdowns (documents only).
   // ext-only:  file-type dropdown (files + documents — anything with extensions).
@@ -1493,16 +2434,22 @@ function setActiveTable(name) {
   loadRows();
 }
 
-function setActiveCharts() {
+function setActiveCharts(preset) {
   state.view = "charts";
-  // Reset chart-page drilldown chain — entering charts is a fresh start.
+  // Reset chart-page drilldown chain — entering charts is a fresh start,
+  // unless the caller passed a preset to apply.
   state.chartFilter = {
     classifiedFilter: "all",
     exactConfidence: "",
     fileTypeFilters: [],
     documentTypeFilters: [],
+    productFilter: "",
+    hasProductFilter: "",
   };
-  document.querySelectorAll(".table-row").forEach((el) => {
+  if (preset && typeof preset === "object") {
+    Object.assign(state.chartFilter, preset);
+  }
+  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
     el.classList.remove("active");
   });
   document.getElementById("charts-row").classList.add("active");
@@ -1514,9 +2461,30 @@ function setActiveCharts() {
   loadCharts();
 }
 
+// Preset shortcuts: each clicks-through to setActiveCharts() with a
+// starting filter chain. Defined here so the wiring at the bottom of
+// the file stays declarative.
+const CHART_PRESETS = {
+  classified:           { classifiedFilter: "classified" },
+  unclassified:         { classifiedFilter: "unclassified" },
+  pdfs:                 { fileTypeFilters: [".pdf"] },
+  "classified-pdfs":    { classifiedFilter: "classified",   fileTypeFilters: [".pdf"] },
+  "unclassified-pdfs":  { classifiedFilter: "unclassified", fileTypeFilters: [".pdf"] },
+  "with-products":      { hasProductFilter: "yes" },
+  "without-products":   { hasProductFilter: "no" },
+};
+
+function hideAllViews() {
+  document.getElementById("table-view").style.display           = "none";
+  document.getElementById("chart-view").style.display           = "none";
+  document.getElementById("help-view").style.display            = "none";
+  document.getElementById("ignored-view").style.display         = "none";
+  document.getElementById("ignored-folders-view").style.display = "none";
+}
+
 function showTableView() {
+  hideAllViews();
   document.getElementById("table-view").style.display = "";
-  document.getElementById("chart-view").style.display = "none";
   // Re-show toolbar pagination controls (hidden in chart mode would be wrong;
   // they're already there — but disabling them keeps them inert).
   document.querySelectorAll(".toolbar input, .toolbar button").forEach((el) => {
@@ -1526,13 +2494,239 @@ function showTableView() {
 }
 
 function showChartView() {
-  document.getElementById("table-view").style.display = "none";
+  hideAllViews();
   document.getElementById("chart-view").style.display = "block";
   // Hide toolbar inputs that don't apply to the chart view.
   for (const id of ["filter", "prev", "next"]) {
     document.getElementById(id).style.display = "none";
   }
   document.getElementById("page-meta").style.display = "none";
+}
+
+function showHelpView() {
+  hideAllViews();
+  document.getElementById("help-view").style.display  = "block";
+  // Help is purely text — hide the table toolbar entirely.
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function showIgnoredView() {
+  hideAllViews();
+  document.getElementById("ignored-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function showIgnoredFoldersView() {
+  hideAllViews();
+  document.getElementById("ignored-folders-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function setActiveHelp() {
+  state.view = "help";
+  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const helpRow = document.getElementById("help-row");
+  if (helpRow) helpRow.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+    el.classList.add("hidden");
+  }
+  showHelpView();
+  loadDashboard();
+}
+
+function setActiveIgnored() {
+  state.view = "ignored";
+  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("ignored-row");
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+    el.classList.add("hidden");
+  }
+  showIgnoredView();
+  loadIgnoredTypes();
+}
+
+function setActiveIgnoredFolders() {
+  state.view = "ignored-folders";
+  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("ignored-folders-row");
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+    el.classList.add("hidden");
+  }
+  showIgnoredFoldersView();
+  loadIgnoredFolders();
+}
+
+async function loadIgnoredFolders() {
+  const tbody = document.querySelector("#ignored-folders-table tbody");
+  if (!tbody) return;
+  let r;
+  try {
+    r = await api("/api/ignored-folders");
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color: var(--danger-text);">Failed to load: ' +
+      (e.message || e) + '</td></tr>';
+    return;
+  }
+  if (!r.folders || r.folders.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color: var(--muted); text-align:center; padding: 18px;">No ignored folders yet. Add one above.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = "";
+  for (const f of r.folders) {
+    const tr = document.createElement("tr");
+    const added = f.added_at ? new Date(f.added_at).toLocaleDateString() : "";
+    const notes = f.notes || "";
+    tr.innerHTML =
+      '<td><code>' + escapeHtml(f.name) + '</code></td>' +
+      '<td>' + Number(f.file_count || 0).toLocaleString() + '</td>' +
+      '<td style="color: var(--muted);">' + escapeHtml(notes) + '</td>' +
+      '<td style="color: var(--muted);">' + added + '</td>' +
+      '<td><button class="secondary ignored-folders-remove" data-name="' + escapeHtml(f.name) +
+        '" style="padding: 2px 8px; font-size: 11px;">Remove</button></td>';
+    tbody.appendChild(tr);
+  }
+  for (const btn of tbody.querySelectorAll(".ignored-folders-remove")) {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.name;
+      const r = await api("/api/ignored-folders/remove", { name });
+      if (!r.ok) { log("remove failed: " + r.error, "err"); return; }
+      log("removed folder " + name + " from ignore list", "ok");
+      loadIgnoredFolders();
+      refreshTableCounts();
+    });
+  }
+}
+
+async function loadIgnoredTypes() {
+  const tbody = document.querySelector("#ignored-table tbody");
+  if (!tbody) return;
+  let r;
+  try {
+    r = await api("/api/ignored-types");
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color: var(--danger-text);">Failed to load: ' +
+      (e.message || e) + '</td></tr>';
+    return;
+  }
+  if (!r.types || r.types.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color: var(--muted); text-align:center; padding: 18px;">No ignored types yet. Add one above.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = "";
+  for (const t of r.types) {
+    const tr = document.createElement("tr");
+    const added = t.added_at ? new Date(t.added_at).toLocaleDateString() : "";
+    const notes = t.notes || "";
+    tr.innerHTML =
+      '<td><code>' + t.ext + '</code></td>' +
+      '<td>' + Number(t.file_count || 0).toLocaleString() + '</td>' +
+      '<td style="color: var(--muted);">' + escapeHtml(notes) + '</td>' +
+      '<td style="color: var(--muted);">' + added + '</td>' +
+      '<td><button class="secondary ignored-remove" data-ext="' + t.ext +
+        '" style="padding: 2px 8px; font-size: 11px;">Remove</button></td>';
+    tbody.appendChild(tr);
+  }
+  for (const btn of tbody.querySelectorAll(".ignored-remove")) {
+    btn.addEventListener("click", async () => {
+      const ext = btn.dataset.ext;
+      const r = await api("/api/ignored-types/remove", { ext });
+      if (!r.ok) { log("remove failed: " + r.error, "err"); return; }
+      log("removed " + ext + " from ignored types", "ok");
+      loadIgnoredTypes();
+      refreshTableCounts();
+    });
+  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Renders the Home dashboard: per-table counts + per-doctype confidence mix.
+// Idempotent — called every time Home is opened so numbers reflect current DB.
+async function loadDashboard() {
+  const countsEl = document.getElementById("dash-counts");
+  const tbody    = document.querySelector("#dash-types-table tbody");
+  const summary  = document.getElementById("dash-class-summary");
+  const empty    = document.getElementById("dash-empty");
+  if (!countsEl || !tbody || !summary) return;
+
+  let r;
+  try {
+    r = await api("/api/dashboard");
+  } catch (e) {
+    summary.textContent = "Failed to load dashboard: " + (e.message || e);
+    return;
+  }
+
+  // Counts grid — table counts (alphabetized, like the sidebar) + the two
+  // ignore-list sizes appended at the end so they're visually grouped.
+  countsEl.innerHTML = "";
+  const entries = Object.entries(r.counts).sort(([a], [b]) => a.localeCompare(b));
+  if (r.ignored) {
+    entries.push(["ignored types",   r.ignored.types   || 0]);
+    entries.push(["ignored folders", r.ignored.folders || 0]);
+  }
+  for (const [tbl, n] of entries) {
+    const card = document.createElement("div");
+    card.className = "dash-card";
+    card.innerHTML =
+      '<div class="label">' + tbl + '</div>' +
+      '<div class="value">' + Number(n).toLocaleString() + '</div>';
+    countsEl.appendChild(card);
+  }
+
+  // Classification summary line.
+  const c = r.classification;
+  if (c.totalDocuments === 0) {
+    summary.textContent = "No documents yet.";
+    if (empty) empty.style.display = "";
+  } else {
+    if (empty) empty.style.display = "none";
+    summary.innerHTML =
+      '<strong>' + c.classified.toLocaleString() + '</strong> of <strong>' +
+      c.totalDocuments.toLocaleString() + '</strong> documents classified ' +
+      '(' + c.pctClassified.toFixed(1) + '%) — ' +
+      c.unclassified.toLocaleString() + ' remaining.';
+  }
+
+  // Per-type breakdown table.
+  tbody.innerHTML = "";
+  const fmtPct = (p) => (p > 0 ? p.toFixed(1) + '%' : '—');
+  const fmtN   = (n) => (n > 0 ? Number(n).toLocaleString() : '0');
+  for (const t of r.byType) {
+    const tr = document.createElement("tr");
+    if (t.total === 0) tr.className = "empty-type";
+    tr.innerHTML =
+      '<td>' + t.name + '</td>' +
+      '<td' + (t.total === 0 ? ' class="zero"' : '') + '>' + fmtN(t.total) + '</td>' +
+      '<td class="pct">' + fmtPct(t.pctOfClassified) + '</td>' +
+      '<td>' + fmtN(t.high)   + ' <span class="pct">' + fmtPct(t.pctHigh)   + '</span></td>' +
+      '<td>' + fmtN(t.medium) + ' <span class="pct">' + fmtPct(t.pctMedium) + '</span></td>' +
+      '<td>' + fmtN(t.low)    + ' <span class="pct">' + fmtPct(t.pctLow)    + '</span></td>';
+    tbody.appendChild(tr);
+  }
 }
 
 async function refreshStatus() {
@@ -1557,6 +2751,7 @@ async function refreshStatus() {
   }
 
   updateClassifyStatus(r.classification);
+  updateIgnoredCounts(r.ignored);
 }
 
 // Light-weight version: just refresh the row counts beside each table.
@@ -1575,6 +2770,15 @@ async function refreshTableCounts() {
     if (span) span.textContent = String(r.counts[tbl]);
   }
   updateClassifyStatus(r.classification);
+  updateIgnoredCounts(r.ignored);
+}
+
+function updateIgnoredCounts(ig) {
+  if (!ig) return;
+  const t = document.getElementById("ignored-types-count");
+  const f = document.getElementById("ignored-folders-count");
+  if (t) t.textContent = String(ig.types || 0);
+  if (f) f.textContent = String(ig.folders || 0);
 }
 
 function updateClassifyStatus(c) {
@@ -1685,6 +2889,8 @@ async function loadRows() {
     exactConfidence: state.exactConfidence,
     fileTypeFilters: state.fileTypeFilters,
     documentTypeFilters: state.documentTypeFilters,
+    productFilter: state.productFilter,
+    hasProductFilter: state.hasProductFilter,
   });
   const thead = document.querySelector("#data-table thead");
   const tbody = document.querySelector("#data-table tbody");
@@ -1759,6 +2965,19 @@ async function loadRows() {
         } else if (state.table === "document_extracts" && c === "file_name") {
           // Make the filename the trigger for the extract modal — same
           // modal the documents view uses, just keyed off document_id.
+          const a = document.createElement("a");
+          a.href = "#";
+          a.className = "open-link";
+          a.textContent = String(v);
+          a.title = "View extracted text for " + v;
+          a.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            showExtract(row.document_id);
+          });
+          td.appendChild(a);
+        } else if (state.table === "document_products" && c === "document_name") {
+          // Same treatment in the document_products view: the document
+          // name opens the extract modal for that document.
           const a = document.createElement("a");
           a.href = "#";
           a.className = "open-link";
@@ -1895,6 +3114,8 @@ function drillToDocuments(delta) {
   state.exactConfidence = "";
   state.fileTypeFilters = [];
   state.documentTypeFilters = [];
+  state.productFilter = "";
+  state.hasProductFilter = "";
   Object.assign(state, delta);
 
   document.getElementById("filter").value = "";
@@ -1912,6 +3133,7 @@ function drillToDocuments(delta) {
       el.dataset.table === "documents" && el.dataset.view !== "charts");
   });
   document.getElementById("charts-row").classList.remove("active");
+  document.querySelectorAll(".chart-preset").forEach((el) => el.classList.remove("active"));
   for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
     el.classList.remove("hidden");
   }
@@ -1925,6 +3147,8 @@ function drillToDocuments(delta) {
   else if (delta.minConfidence && delta.minConfidence !== "all") summary.push("min confidence=" + delta.minConfidence);
   if (delta.fileTypeFilters     && delta.fileTypeFilters.length)     summary.push("file_type=" + delta.fileTypeFilters.join(","));
   if (delta.documentTypeFilters && delta.documentTypeFilters.length) summary.push("document_type=" + delta.documentTypeFilters.join(","));
+  if (delta.productFilter)    summary.push("product=" + delta.productFilter);
+  if (delta.hasProductFilter) summary.push("has_product=" + delta.hasProductFilter);
   log("drilled to documents · " + summary.join(" · "), "info");
 }
 
@@ -1940,7 +3164,12 @@ function chartFilterHidesAllPies(cf) {
   const filetypeHidden   = !!(cf.fileTypeFilters && cf.fileTypeFilters.length);
   const doctypeHidden    = !!(cf.documentTypeFilters && cf.documentTypeFilters.length)
     || cf.classifiedFilter === "unclassified";
-  return classifiedHidden && confidenceHidden && filetypeHidden && doctypeHidden;
+  // Product pies hide when productFilter is set. Coverage pie hides when
+  // hasProductFilter is set (one side only).
+  const productHidden    = !!cf.productFilter;
+  const coverageHidden   = !!cf.productFilter || !!cf.hasProductFilter;
+  return classifiedHidden && confidenceHidden && filetypeHidden && doctypeHidden
+    && productHidden && coverageHidden;
 }
 
 // Apply a chart-page drilldown delta into state.chartFilter and reload.
@@ -1957,6 +3186,8 @@ function chartDrillIn(delta) {
       exactConfidence:     composed.exactConfidence,
       fileTypeFilters:     (composed.fileTypeFilters || []).slice(),
       documentTypeFilters: (composed.documentTypeFilters || []).slice(),
+      productFilter:       composed.productFilter || "",
+      hasProductFilter:    composed.hasProductFilter || "",
     });
     return;
   }
@@ -1970,6 +3201,8 @@ function clearChartFilter() {
     exactConfidence: "",
     fileTypeFilters: [],
     documentTypeFilters: [],
+    productFilter: "",
+    hasProductFilter: "",
   };
   loadCharts();
 }
@@ -1983,6 +3216,8 @@ function chartViewDocuments() {
     exactConfidence:     cf.exactConfidence,
     fileTypeFilters:     cf.fileTypeFilters.slice(),
     documentTypeFilters: cf.documentTypeFilters.slice(),
+    productFilter:       cf.productFilter || "",
+    hasProductFilter:    cf.hasProductFilter || "",
   });
 }
 
@@ -1993,6 +3228,8 @@ function renderBreadcrumb() {
   if (cf.fileTypeFilters     && cf.fileTypeFilters.length)     parts.push("file_type=" + cf.fileTypeFilters.join(", "));
   if (cf.documentTypeFilters && cf.documentTypeFilters.length) parts.push("document_type=" + cf.documentTypeFilters.join(", "));
   if (cf.exactConfidence)    parts.push("confidence=" + cf.exactConfidence);
+  if (cf.productFilter)      parts.push("product=" + cf.productFilter);
+  if (cf.hasProductFilter)   parts.push("has_product=" + cf.hasProductFilter);
   document.getElementById("chart-crumb").textContent = parts.join(" › ");
   const filtered = parts.length > 1;
   document.getElementById("chart-clear").style.display      = filtered ? "" : "none";
@@ -2013,7 +3250,9 @@ async function loadCharts() {
   const isScoped = cf.classifiedFilter !== "all"
     || cf.exactConfidence
     || (cf.fileTypeFilters && cf.fileTypeFilters.length)
-    || (cf.documentTypeFilters && cf.documentTypeFilters.length);
+    || (cf.documentTypeFilters && cf.documentTypeFilters.length)
+    || cf.productFilter
+    || cf.hasProductFilter;
   document.getElementById("chart-meta").textContent = isScoped
     ? "Showing " + r.total + " documents matching the filter chain."
     : "Snapshot of all " + r.total + " documents and " + (r.totalFiles ?? 0) +
@@ -2137,6 +3376,82 @@ async function loadCharts() {
         (label) => ({ documentTypeFilters: addToArray(cf.documentTypeFilters, label) }),
       );
     }
+  }
+
+  // Pies 7-9 — product family ----------------------------------------
+  // (c) Coverage: docs with at least one product link vs without.
+  //     Hidden once a productFilter narrows everything to one side.
+  const coverageCard = document.getElementById("card-product-coverage");
+  if (cf.productFilter) {
+    coverageCard.style.display = "none";
+    if (liveCharts["chart-product-coverage"]) {
+      liveCharts["chart-product-coverage"].destroy();
+      delete liveCharts["chart-product-coverage"];
+    }
+  } else {
+    coverageCard.style.display = "";
+    makeDoughnut(
+      "chart-product-coverage",
+      [
+        { label: "with products",    value: r.docsWithProducts ?? 0,    color: "#4a9d4a" },
+        { label: "without products", value: r.docsWithoutProducts ?? 0, color: "#5a5563" },
+      ],
+      (label) => ({ hasProductFilter: label === "with products" ? "yes" : "no" }),
+    );
+  }
+
+  // (a) Top 20 products. When a productFilter is already set, this pie is
+  //     redundant (single slice — the chosen product) so we hide it.
+  const productsTopCard = document.getElementById("card-products-top");
+  if (cf.productFilter || !(r.byProductTop || []).length) {
+    productsTopCard.style.display = "none";
+    if (liveCharts["chart-products-top"]) {
+      liveCharts["chart-products-top"].destroy();
+      delete liveCharts["chart-products-top"];
+    }
+  } else {
+    productsTopCard.style.display = "";
+    makeDoughnut(
+      "chart-products-top",
+      r.byProductTop.map((row, i) => ({
+        // Show "Vendor • Product" as the label so two products with the
+        // same model id from different vendors don't collapse into one
+        // slice. Tooltip + drilldown still use just the product.
+        label: row.vendor + " • " + row.product,
+        value: row.n,
+        color: EXT_PALETTE[i % EXT_PALETTE.length],
+      })),
+      // Drilldown: filter to that product. The label includes the vendor
+      // prefix; we strip it back to the bare product name for the filter.
+      (label) => {
+        const i = label.indexOf(" • ");
+        const product = i >= 0 ? label.slice(i + 3) : label;
+        return { productFilter: product };
+      },
+    );
+  }
+
+  // (b) Products discovered per vendor. Static / informational —
+  //     non-clickable. Hidden once productFilter narrows the corpus.
+  const productsVendorCard = document.getElementById("card-products-vendor");
+  if (cf.productFilter || !(r.productsPerVendor || []).length) {
+    productsVendorCard.style.display = "none";
+    if (liveCharts["chart-products-vendor"]) {
+      liveCharts["chart-products-vendor"].destroy();
+      delete liveCharts["chart-products-vendor"];
+    }
+  } else {
+    productsVendorCard.style.display = "";
+    makeDoughnut(
+      "chart-products-vendor",
+      r.productsPerVendor.map((row, i) => ({
+        label: row.vendor,
+        value: row.n,
+        color: EXT_PALETTE[i % EXT_PALETTE.length],
+      })),
+      // Vendor-filter not yet supported — return null to disable drilldown.
+      () => null,
+    );
   }
 }
 
@@ -2326,14 +3641,149 @@ async function runIngest(which) {
 }
 
 async function runPurge(target) {
-  const label = target === "all" ? "BOTH tables" : target;
+  // Tables wiped per target (must match handlePurge in server.js):
+  //   all     → vendors, files (cascades to documents, document_extracts, document_products), products
+  //   files   → files (cascades to documents, document_extracts, document_products)
+  //   vendors → vendors only (FK-checked: requires files+products empty)
+  // Preserved across all purges: document_types, ignored_file_types, ignored_folders.
+  const PURGED_TABLES = {
+    all:     ["vendors", "files", "documents", "document_extracts", "products", "document_products"],
+    files:   ["files", "documents", "document_extracts", "document_products"],
+    vendors: ["vendors"],
+  };
+  const label = target === "all" ? "ALL data tables" : target;
   if (!window.confirm("Really delete every row from " + label + "?")) return;
   log("Purging " + label + "…", "info");
   const r = await api("/api/purge", { target });
   if (!r.ok) { log(r.error, "err"); return; }
-  log("purged " + label + ". now: " + r.counts.vendors + " vendors, " + r.counts.files + " files", "ok");
+
+  const wiped = PURGED_TABLES[target] || [];
+  const wipedSummary = wiped.length
+    ? "wiped: " + wiped.join(", ")
+    : "purge complete";
+  // Show post-purge row count for each table that was touched.
+  const remaining = wiped
+    .map((t) => t + "=" + (r.counts[t] ?? "?"))
+    .join(" · ");
+  log("purged " + label + ". " + wipedSummary + ". now: " + remaining, "ok");
   await refreshStatus();
   await loadRows();
+}
+
+async function runPurgeTextBackups() {
+  if (!window.confirm("Really delete the <Vendors>_text folder(s) on disk? This removes the filesystem extraction cache.")) return;
+  log("Purging text-extract backups…", "info");
+  const r = await api("/api/purge-text-backups", {});
+  if (!r.ok) { log(r.error || "purge-text-backups failed", "err"); return; }
+  if (r.count === 0) {
+    log("no backup folders found to purge", "info");
+    return;
+  }
+  for (const t of r.targets) {
+    const kind = t.status.startsWith("error") ? "err"
+      : t.status === "deleted" ? "ok" : "info";
+    log("  " + t.status + ": " + t.path, kind);
+  }
+}
+
+// Full Process: vendors → files → classify by filename → extract PDFs →
+// classify by content. Each stage waits for the previous to finish; the
+// extraction phase polls extract-status until idle. Buttons stay disabled
+// throughout. Runs every stage every time (idempotent by design).
+async function runFullProcess() {
+  if (!window.confirm("Run the full process? Vendors + files ingest, then classify by filename, then extract PDFs (slow), then classify by content.")) return;
+  if (!state.listingPath) {
+    log("No listing chosen. Click 'Choose folder…' first.", "err");
+    return;
+  }
+  setIngestEnabled(false);
+  log("══ Full Process: starting", "info");
+  try {
+    // 1. Vendors ingest
+    log("[1/6] vendors ingest…", "info");
+    {
+      const r = await api("/api/ingest", { which: "vendors", source: state.listingPath });
+      if (!r.ok) { log("vendors ingest failed: " + r.error, "err"); return; }
+      log("  +" + r.addedVendors + " new vendors, " + r.skippedPaths + " skipped", "ok");
+    }
+
+    // 2. Files ingest
+    log("[2/6] files ingest…", "info");
+    {
+      const r = await api("/api/ingest", { which: "files", source: state.listingPath });
+      if (!r.ok) { log("files ingest failed: " + r.error, "err"); return; }
+      log("  " + r.files + " file rows, " + r.docsCreated + " documents", "ok");
+    }
+    await refreshStatus();
+    await loadRows();
+
+    // 3. Classify by filename
+    log("[3/6] classify by filename…", "info");
+    {
+      const r = await api("/api/classify", {});
+      if (!r.ok) { log("classify failed: " + r.error, "err"); return; }
+      log("  classified " + r.updated + ", kept " + (r.kept || 0) +
+          " (high " + r.byConfidence.high + " · medium " + r.byConfidence.medium +
+          " · low " + r.byConfidence.low + ")", "ok");
+    }
+    await refreshStatus();
+
+    // 4. Extract PDFs (background) — kick off, then poll until idle.
+    log("[4/6] extract PDF text (background, this is the slow stage)…", "info");
+    {
+      const r = await api("/api/extract-start", { onlyMissing: true });
+      if (!r.ok && !/already running/i.test(r.error || "")) {
+        log("extract-start failed: " + (r.error || "unknown"), "err");
+        return;
+      }
+    }
+    await waitForExtractIdle();
+    log("  extraction phase complete", "ok");
+    await refreshStatus();
+
+    // 5. Classify by content
+    log("[5/6] classify by extract content (low/none only)…", "info");
+    {
+      const r = await api("/api/classify-by-content", {});
+      if (!r.ok) { log("content classify failed: " + r.error, "err"); return; }
+      log("  +" + r.updated + " classified from content, " + r.unmatched + " unmatched", "ok");
+    }
+    await refreshStatus();
+
+    // 6. Classify products (vendor-scoped rules; M:N to documents)
+    log("[6/6] classify products…", "info");
+    {
+      const r = await api("/api/classify-products", {});
+      if (!r.ok) { log("product classify failed: " + r.error, "err"); return; }
+      log("  " + r.distinctProducts + " products · " + r.totalLinks + " doc-product links · " +
+          r.docsWithProducts + "/" + r.docsScanned + " docs matched", "ok");
+    }
+    await refreshStatus();
+    await loadRows();
+
+    log("══ Full Process: done", "ok");
+  } catch (e) {
+    log("Full Process aborted: " + String(e), "err");
+  } finally {
+    setIngestEnabled(true);
+  }
+}
+
+// Poll extract-status until running flips to false. Bounded by a hard
+// timeout (12 hours) so a runaway never hangs the orchestrator forever.
+async function waitForExtractIdle() {
+  const HARD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
+  const POLL_MS = 2000;
+  const started = Date.now();
+  while (Date.now() - started < HARD_TIMEOUT_MS) {
+    let r;
+    try {
+      r = await fetch("/api/extract-status").then((res) => res.json());
+    } catch { /* network blip — retry */ r = null; }
+    if (r && r.ok && r.status && !r.status.running) return;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+  throw new Error("extraction did not finish within 12 hours");
 }
 
 // Returns the row's full path string when this cell should render as a
@@ -2355,6 +3805,9 @@ function openablePathFor(table, column, row) {
     if (column === "path" || column === "name") {
       return row.path || null;
     }
+  }
+  if (table === "document_products") {
+    if (column === "file_path") return row.file_path || null;
   }
   return null;
 }
@@ -2441,8 +3894,17 @@ async function showExtract(documentId) {
 }
 
 function setIngestEnabled(on) {
-  for (const id of ["run-vendors", "run-files", "run-full", "classify-all", "classify-by-content"]) {
-    document.getElementById(id).disabled = !on;
+  // Pipeline-action rows in the sidebar's Actions menu get a "disabled"
+  // class while a long-running run is in flight. The click delegator
+  // ignores rows with that class. Stop extraction stays clickable — it's
+  // the way out.
+  const PIPELINE_ACTIONS = [
+    "run-full-process", "run-vendors", "run-files", "run-full",
+    "classify-all", "classify-by-content", "classify-products",
+  ];
+  for (const action of PIPELINE_ACTIONS) {
+    const el = document.querySelector('.action-row[data-action="' + action + '"]');
+    if (el) el.classList.toggle("disabled", !on);
   }
 }
 
@@ -2462,18 +3924,25 @@ async function refreshExtractStatus() {
   } catch { return; }
   if (!r.ok) return;
   const s = r.status;
-  const el     = document.getElementById("extract-status");
-  const startB = document.getElementById("extract-start");
-  const stopB  = document.getElementById("extract-stop");
+  const el    = document.getElementById("extract-status");
+  const stopB = document.getElementById("extract-stop");
 
-  let msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs + " PDFs";
+  // Cumulative corpus progress: how much of the total has been extracted
+  // overall (across all start/stop cycles). 0 when there are no PDFs.
+  const pct = r.totalPdfs > 0
+    ? Math.min(100, Math.max(0, (r.extractedCount / r.totalPdfs) * 100))
+    : 0;
+
+  let msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs + " PDFs (" + pct.toFixed(1) + "%)";
   if (s.running) {
     msg += "  ·  this run: " + s.done + " done";
+    if (s.cached)  msg += " · " + s.cached + " cached";
     if (s.failed)  msg += " · " + s.failed + " failed";
     if (s.skipped) msg += " · " + s.skipped + " skipped";
     msg += " of " + s.total;
     el.classList.add("running");
-    startB.disabled = true;
+    el.classList.add("with-progress");
+    el.style.setProperty("--progress", pct.toFixed(1) + "%");
     stopB.style.display = "";
     if (s.currentDoc) {
       el.innerHTML = msg + '<div class="current"></div>';
@@ -2481,19 +3950,17 @@ async function refreshExtractStatus() {
     } else {
       el.textContent = msg;
     }
-    // Live update of sidebar table counts while the run is in flight.
     refreshTableCounts();
   } else {
     el.classList.remove("running");
-    startB.disabled = false;
+    el.classList.remove("with-progress");
+    el.style.removeProperty("--progress");
     stopB.style.display = "none";
     if (s.finishedAt && s.total > 0) {
       msg += "  ·  last run: " + s.done + " done";
       if (s.failed) msg += ", " + s.failed + " failed";
     }
     el.textContent = msg;
-    // One last sidebar refresh on the running→idle transition so the
-    // final document_extracts count settles correctly.
     if (extractWasRunning) refreshTableCounts();
   }
   extractWasRunning = s.running;
@@ -2539,7 +4006,8 @@ async function runClassify() {
     log(
       "classified " + r.updated + "/" + r.totalFiles + " files " +
       "(high " + r.byConfidence.high + " · medium " + r.byConfidence.medium +
-      " · low " + r.byConfidence.low + " · unmatched " + r.byConfidence.none + ")",
+      " · low " + r.byConfidence.low + " · unmatched " + r.byConfidence.none +
+      (r.kept ? " · kept " + r.kept : "") + ")",
       "ok",
     );
     if (r.unknownDocType > 0) {
@@ -2549,6 +4017,36 @@ async function runClassify() {
     const top = Object.entries(r.byType).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (top.length) {
       log("top: " + top.map(([k, v]) => k + " " + v).join(" · "), "info");
+    }
+    await refreshStatus();
+    await loadRows();
+  } catch (e) {
+    log(String(e), "err");
+  } finally {
+    setIngestEnabled(true);
+  }
+}
+
+async function runClassifyProducts() {
+  log("Classifying products (vendor-scoped rules)…", "info");
+  setIngestEnabled(false);
+  try {
+    const r = await api("/api/classify-products", {});
+    if (!r.ok) { log(r.error, "err"); return; }
+    log(
+      "products: " + r.distinctProducts + " distinct · " +
+      r.totalLinks + " links · " +
+      r.docsWithProducts + "/" + r.docsScanned + " documents matched · " +
+      r.rulesLoaded + " rules",
+      "ok",
+    );
+    if (r.unknownVendors && r.unknownVendors.length) {
+      log("warning: rules reference unknown vendors: " + r.unknownVendors.join(", "), "err");
+    }
+    const top = Object.entries(r.byVendor).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (top.length) {
+      log("top vendors by product hits: " +
+        top.map(([k, v]) => k + " " + v).join(" · "), "info");
     }
     await refreshStatus();
     await loadRows();
@@ -2589,15 +4087,36 @@ async function runClassifyByContent() {
 }
 
 // Wire up
-document.getElementById("run-vendors").addEventListener("click", () => runIngest("vendors"));
-document.getElementById("run-files").addEventListener("click", () => runIngest("files"));
-document.getElementById("run-full").addEventListener("click", () => runIngest("full"));
-document.getElementById("purge-vendors").addEventListener("click", () => runPurge("vendors"));
-document.getElementById("purge-files").addEventListener("click", () => runPurge("files"));
-document.getElementById("purge-all").addEventListener("click", () => runPurge("all"));
-document.getElementById("classify-all").addEventListener("click", runClassify);
-document.getElementById("classify-by-content").addEventListener("click", runClassifyByContent);
-document.getElementById("extract-start").addEventListener("click", runExtractStart);
+
+// --- Actions menu (inline, nested <details>) -----------------------------
+// All action rows in the sidebar carry a data-action attribute mapping to
+// a handler in this table. Click delegation on the document root keeps
+// wiring trivial — the action rows are static markup, no per-row listener.
+const ACTIONS = {
+  "purge-vendors":       () => runPurge("vendors"),
+  "purge-files":         () => runPurge("files"),
+  "purge-all":           () => runPurge("all"),
+  "purge-text-backups":  runPurgeTextBackups,
+  "run-vendors":         () => runIngest("vendors"),
+  "run-files":           () => runIngest("files"),
+  "run-full":            () => runIngest("full"),
+  "run-full-process":    runFullProcess,
+  "classify-all":        runClassify,
+  "classify-by-content": runClassifyByContent,
+  "classify-products":   runClassifyProducts,
+  "extract-start":       runExtractStart,
+  "extract-stop":        runExtractStop,
+};
+
+document.addEventListener("click", (e) => {
+  const row = e.target.closest(".action-row");
+  if (!row || row.classList.contains("disabled")) return;
+  const action = row.dataset.action;
+  const handler = ACTIONS[action];
+  if (handler) handler();
+  else log("unknown action: " + action, "err");
+});
+
 document.getElementById("extract-stop").addEventListener("click", runExtractStop);
 document.getElementById("refresh").addEventListener("click", async () => {
   await refreshStatus();
@@ -2758,7 +4277,79 @@ document.getElementById("confidence-filter").addEventListener("change", (e) => {
   state.offset = 0;
   loadRows();
 });
-document.getElementById("charts-row").addEventListener("click", setActiveCharts);
+document.getElementById("charts-row").addEventListener("click", () => setActiveCharts());
+document.getElementById("help-row").addEventListener("click", setActiveHelp);
+document.getElementById("ignored-row").addEventListener("click", setActiveIgnored);
+document.getElementById("ignored-folders-row").addEventListener("click", setActiveIgnoredFolders);
+document.getElementById("doctypes-row").addEventListener("click", () => setActiveTable("document_types"));
+
+// Add-ignored-type form. Enter in the ext input also submits.
+(function initIgnoredForm() {
+  const input = document.getElementById("ignored-input");
+  const notes = document.getElementById("ignored-notes");
+  const btn   = document.getElementById("ignored-add");
+  if (!input || !btn) return;
+  async function submit() {
+    const ext = input.value.trim();
+    if (!ext) return;
+    const r = await api("/api/ignored-types/add", { ext, notes: notes.value.trim() });
+    if (!r.ok) { log("add failed: " + r.error, "err"); return; }
+    log("added " + r.ext + " to ignored types", "ok");
+    input.value = "";
+    notes.value = "";
+    loadIgnoredTypes();
+    refreshTableCounts();
+  }
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  notes.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+})();
+
+(function initIgnoredFoldersForm() {
+  const input = document.getElementById("ignored-folders-input");
+  const notes = document.getElementById("ignored-folders-notes");
+  const btn   = document.getElementById("ignored-folders-add");
+  if (!input || !btn) return;
+  async function submit() {
+    const name = input.value.trim();
+    if (!name) return;
+    const r = await api("/api/ignored-folders/add", { name, notes: notes.value.trim() });
+    if (!r.ok) { log("add failed: " + r.error, "err"); return; }
+    log("added folder " + r.name + " to ignore list", "ok");
+    input.value = "";
+    notes.value = "";
+    loadIgnoredFolders();
+    refreshTableCounts();
+  }
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  notes.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+})();
+
+// Log strip collapse/expand. Persisted in localStorage so the user's choice
+// survives page reloads.
+(function initLogToggle() {
+  const wrap = document.getElementById("log-wrap");
+  const header = document.getElementById("log-header");
+  if (!wrap || !header) return;
+  const KEY = "enlogosgrag.logCollapsed";
+  if (localStorage.getItem(KEY) === "1") wrap.classList.add("collapsed");
+  header.addEventListener("click", () => {
+    wrap.classList.toggle("collapsed");
+    localStorage.setItem(KEY, wrap.classList.contains("collapsed") ? "1" : "0");
+  });
+})();
+for (const el of document.querySelectorAll(".chart-preset")) {
+  el.addEventListener("click", () => {
+    const preset = CHART_PRESETS[el.dataset.preset];
+    if (!preset) return;
+    setActiveCharts(preset);
+    // Highlight the chosen preset, deactivate the parent "All documents".
+    document.querySelectorAll(".chart-preset").forEach((x) => x.classList.remove("active"));
+    document.getElementById("charts-row").classList.remove("active");
+    el.classList.add("active");
+  });
+}
 document.getElementById("chart-clear").addEventListener("click", clearChartFilter);
 document.getElementById("chart-view-docs").addEventListener("click", chartViewDocuments);
 
@@ -2803,13 +4394,46 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
     }
     openListingPicker(start);
   });
+
+  // Rescan: delete the existing basic_listing.txt and walk the folder again.
+  // Operates on whatever folder the current listing lives in. Doesn't touch
+  // the DB — user runs files-ingest separately to push the new content.
+  document.getElementById("rescan-listing").addEventListener("click", async () => {
+    if (!state.listingPath) {
+      log("No folder chosen yet — click 'Choose folder…' first.", "err");
+      return;
+    }
+    const i = Math.max(state.listingPath.lastIndexOf("\\"), state.listingPath.lastIndexOf("/"));
+    const folder = i > 0 ? state.listingPath.slice(0, i) : "";
+    if (!folder) {
+      log("Cannot resolve folder from listing path.", "err");
+      return;
+    }
+    if (!window.confirm("Delete " + state.listingPath + " and regenerate it by walking " + folder + "?")) return;
+    log("Rescanning " + folder + "…", "info");
+    try {
+      const r = await api("/api/rescan-listing", { folder });
+      if (!r.ok) { log("rescan failed: " + r.error, "err"); return; }
+      setListingPath(r.listingPath);
+      log(
+        (r.deletedExisting ? "regenerated" : "generated") +
+          " listing: " + r.listingPath + " (" + r.lineCount + " lines)",
+        "ok",
+      );
+      log("Run 'files ingest' next to push the new listing into the DB.", "info");
+    } catch (e) {
+      log("rescan failed: " + String(e), "err");
+    }
+  });
   setListingPath(localStorage.getItem(LISTING_KEY) || "");
 
   // Initial extract status fetch + start polling so the running state
   // picks up automatically after a page reload.
   await refreshExtractStatus();
   startExtractPolling();
-  await loadRows();
+
+  // Default landing page is Home (dashboard). Charts/Tables remain one click away.
+  setActiveHelp();
 })();
 </script>
 </body>
@@ -2822,6 +4446,16 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
       sendHtml(res, PAGE);
+      return;
+    }
+    if (req.method === "GET" && (req.url === "/help" || req.url === "/help.html")) {
+      const helpPath = path.join(SERVER_DIR, "help.html");
+      if (fs.existsSync(helpPath)) {
+        sendHtml(res, fs.readFileSync(helpPath, "utf8"));
+      } else {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("help.html not found");
+      }
       return;
     }
     if (req.method === "GET" && req.url === "/api/status") {
@@ -2845,12 +4479,20 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handlePurge(await readBody(req)));
       return;
     }
+    if (req.method === "POST" && req.url === "/api/purge-text-backups") {
+      sendJson(res, 200, handlePurgeTextBackups());
+      return;
+    }
     if (req.method === "POST" && req.url === "/api/classify") {
       sendJson(res, 200, handleClassify());
       return;
     }
     if (req.method === "POST" && req.url === "/api/classify-by-content") {
       sendJson(res, 200, handleClassifyByContent());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/classify-products") {
+      sendJson(res, 200, handleClassifyProducts());
       return;
     }
     if (req.method === "POST" && req.url === "/api/extract-start") {
@@ -2885,6 +4527,10 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleChooseFolder(await readBody(req)));
       return;
     }
+    if (req.method === "POST" && req.url === "/api/rescan-listing") {
+      sendJson(res, 200, handleRescanListing(await readBody(req)));
+      return;
+    }
     if (req.method === "GET" && req.url === "/api/stats") {
       sendJson(res, 200, handleStats());
       return;
@@ -2899,6 +4545,34 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/stats") {
       sendJson(res, 200, handleStats(await readBody(req)));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/dashboard") {
+      sendJson(res, 200, handleDashboard());
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/ignored-types") {
+      sendJson(res, 200, handleListIgnoredTypes());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-types/add") {
+      sendJson(res, 200, handleAddIgnoredType(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-types/remove") {
+      sendJson(res, 200, handleRemoveIgnoredType(await readBody(req)));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/ignored-folders") {
+      sendJson(res, 200, handleListIgnoredFolders());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-folders/add") {
+      sendJson(res, 200, handleAddIgnoredFolder(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-folders/remove") {
+      sendJson(res, 200, handleRemoveIgnoredFolder(await readBody(req)));
       return;
     }
     res.writeHead(404, { "content-type": "text/plain" });

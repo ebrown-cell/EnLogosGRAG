@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EnLogosGRAG — Help</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f5f3f7;
+    --inset: #fafafc;
+    --border: #c8c2d0;
+    --text: #1a1820;
+    --muted: #6a6573;
+    --accent: #8b2090;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px;
+  }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; color: var(--accent); }
+  header .meta { font-size: 12px; color: var(--muted); }
+  header a { margin-left: auto; font-size: 12px; color: var(--accent); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 32px; }
+  h2.help-h { color: var(--accent); margin: 0 0 8px 0; font-size: 22px; }
+  h3.help-h { color: var(--accent); margin: 24px 0 8px 0; font-size: 17px; }
+  p.help-p { line-height: 1.55; margin: 0 0 12px 0; font-size: 14px; }
+  ol.help-ol, ul.help-ul { line-height: 1.55; margin: 0 0 14px 20px; font-size: 14px; }
+  ol.help-ol li, ul.help-ul li { margin: 4px 0; }
+  code {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 5px; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>EnLogosGRAG</h1>
+  <span class="meta">Help</span>
+  <a href="/">← Back to app</a>
+</header>
+<main>
+  <h2 class="help-h">EnLogosGRAG — quickstart</h2>
+  <p class="help-p">A local web app for cataloging a corpus of vendor documents. Extracts metadata, vendors, and document types <strong>without AI</strong>, using two stages of rule-based extraction. Free, deterministic, editable in seconds.</p>
+
+  <h3 class="help-h">First-time setup</h3>
+  <ol class="help-ol">
+    <li><strong>Source listing → Choose folder…</strong> Pick the folder whose immediate subfolders are vendor names (e.g. <code>…\Vendors\</code>). The server uses an existing <code>basic_listing.txt</code> if present, or generates one by walking the folder.</li>
+    <li><strong>Actions → Ingest → Full Process.</strong> One click runs the whole pipeline: vendors ingest → files ingest → classify by filename → extract PDF text → classify by content. Each stage is idempotent; safe to re-run.</li>
+    <li><strong>Charts page</strong> reflects the result. Use the preset shortcuts (Classified only, Unclassified PDFs, etc.) to focus on what you want to see.</li>
+  </ol>
+
+  <h3 class="help-h">What the two classifiers do</h3>
+  <ul class="help-ul">
+    <li><strong>Filename rules</strong> (<code>classifier.yaml</code>) match against the file's name, parent folder, full path, and extension. Fast, runs against every file. Catches obvious cases like <em>"…Installation Manual.pdf"</em>.</li>
+    <li><strong>Content rules</strong> (<code>content_classifier.yaml</code>) match against the extracted PDF text — first-page anchors and full-body keywords. Only runs against documents the filename rules left unclassified or low-confidence.</li>
+  </ul>
+  <p class="help-p">Edit either YAML file and click the corresponding Classify button — rules reload from disk on every run.</p>
+
+  <h3 class="help-h">Browsing the data</h3>
+  <ul class="help-ul">
+    <li><strong>Tables</strong> in the sidebar — vendors, document_types, files, documents, document_extracts. Click a table to view its rows.</li>
+    <li><strong>Filter row</strong> above the table accepts text, file-type, document-type, classified/unclassified, and confidence-threshold filters. Multi-select for file/document type. Column widths drag-resize and persist.</li>
+    <li><strong>Click a filename or path</strong> to open the file in its OS default app (PDF in Acrobat, etc.).</li>
+    <li><strong>Click "view"</strong> in the <code>extract</code> column to read a document's extracted text + PDF metadata.</li>
+  </ul>
+
+  <h3 class="help-h">Charts and drilldown</h3>
+  <ul class="help-ul">
+    <li>Six pies: Classified vs unclassified · By confidence · Top ten filetypes · Other filetypes · By document type · Other document types.</li>
+    <li><strong>Click a slice</strong> to compose a filter and re-render the chart page scoped to that subset. Breadcrumb at the top tracks the chain.</li>
+    <li><strong>"View these documents →"</strong> jumps from a filtered chart to the documents table with the same filters.</li>
+    <li>When the filter chain narrows so far that no pie has anything to chart, you're auto-routed to the documents table.</li>
+  </ul>
+
+  <h3 class="help-h">Filesystem cache</h3>
+  <p class="help-p">PDF text extraction is the slow stage. To survive DB wipes, every successful extract is also written to a sibling folder named <code>&lt;Vendors&gt;_text/</code> as a JSON file mirroring the source tree. On subsequent runs the server reads the JSON cache instead of re-running pdfjs. Use <strong>Purge → Purge text backups</strong> to clear it.</p>
+
+  <h3 class="help-h">Editing the rules</h3>
+  <p class="help-p">Both YAML files live next to the server source. Each rule has <code>id</code>, <code>document_type</code>, <code>confidence</code> (high/medium/low), <code>match</code> (name/parent/path/file_type for filename rules; first_page/extract for content rules), and <code>pattern</code> (a JS regex, case-insensitive). First match wins — put specific patterns above general ones.</p>
+</main>
+</body>
+</html>

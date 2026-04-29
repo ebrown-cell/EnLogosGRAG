@@ -160,10 +160,30 @@ export function ingestFiles(db, paths) {
     );
   }
 
+  // Folders to drop entirely (the folder + all descendants). Match is
+  // exact, case-insensitive, against any segment of the path. See
+  // db.js / ignored_folders for the contract.
+  const ignoredFolders = new Set(
+    db.prepare("SELECT name FROM ignored_folders").all()
+      .map((r) => r.name.toLowerCase()),
+  );
+  const hasIgnoredSegment = (p) => {
+    if (ignoredFolders.size === 0) return false;
+    for (const seg of winParts(p)) {
+      if (ignoredFolders.has(seg.toLowerCase())) return true;
+    }
+    return false;
+  };
+  let folderSkipped = 0;
+
   // Sort paths by depth ascending so a parent is always inserted before
   // its children — lets us look up parent_id from the in-memory Map as we go.
   const usablePaths = paths
-    .filter((p) => vendorOf(p) !== null)
+    .filter((p) => {
+      if (vendorOf(p) === null) return false;
+      if (hasIgnoredSegment(p)) { folderSkipped++; return false; }
+      return true;
+    })
     .map((p) => ({ p, depth: winParts(p).length - 1 }))
     .sort((a, b) => a.depth - b.depth)
     .map((x) => x.p);
@@ -176,7 +196,14 @@ export function ingestFiles(db, paths) {
     "INSERT INTO documents (file_id, document_type_id, confidence) VALUES (?, NULL, NULL)",
   );
 
+  // Extensions to ingest as files but NOT create documents rows for.
+  // See db.js / ignored_file_types for the contract.
+  const ignoredExts = new Set(
+    db.prepare("SELECT ext FROM ignored_file_types").all().map((r) => r.ext),
+  );
+
   let docsCreated = 0;
+  let docsSkipped = 0;
 
   withTx(db, () => {
     // Wipe and start clean. ON DELETE CASCADE drops documents alongside files.
@@ -208,16 +235,22 @@ export function ingestFiles(db, paths) {
       idByPath.set(p, fileId);
 
       if (isFile) {
-        insertDoc.run(fileId);
-        docsCreated++;
+        if (ignoredExts.has(ext)) {
+          docsSkipped++;
+        } else {
+          insertDoc.run(fileId);
+          docsCreated++;
+        }
       }
     }
   });
 
   return {
     lines: paths.length,
-    files: usable,
+    files: usable - folderSkipped,
     docsCreated,
+    docsSkipped,
+    folderSkipped,
     skippedPaths: skipped,
   };
 }
