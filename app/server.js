@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 
 import { openDb } from "./db.js";
 import { readListing, ingestVendors, ingestFiles } from "./listing.js";
-import { classifyAll, classifyAllByContent, classifyAllByProduct } from "./classifier.js";
+import {
+  classifyAll, classifyAllByContent, classifyAllByProduct,
+  readFilenameRules, readContentRulesRaw, readProductRulesRaw,
+  writeFilenameRules, writeContentRules, writeProductRules,
+  CLASSIFIER_KINDS,
+} from "./classifier.js";
 import * as extractor from "./extractor.js";
 
 // The extractor needs to translate canonical S:\ paths to local paths
@@ -17,6 +22,11 @@ import * as extractor from "./extractor.js";
 extractor.setPathRemapper(remapPath);
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+// Repo root sits one level above app/. Used to resolve siblings like
+// public/, uploads/, db/, classifiers/.
+const REPO_DIR = path.resolve(SERVER_DIR, "..");
+const PUBLIC_DIR  = path.join(REPO_DIR, "public");
+const UPLOADS_DIR = path.join(REPO_DIR, "uploads");
 
 const PORT = Number(process.env.PORT) || 8780;
 const DEFAULT_SOURCE = "C:\\data\\PyroCommData";
@@ -230,6 +240,21 @@ function handleBrowse(body) {
       const placeholders = body.fileTypeFilters.map(() => "?").join(",");
       clauses.push(`file_type IN (${placeholders})`);
       args.push(...body.fileTypeFilters);
+    }
+    // Files table: filter by whether the file has a paired documents row.
+    // active = in-scope (documents row exists); ignored = no documents row,
+    // i.e. extension was on the ignore list at last ingest. Directories are
+    // excluded from "active"/"ignored" since they never get documents rows.
+    if (table === "files" && body.ignoredFilter && body.ignoredFilter !== "all") {
+      if (body.ignoredFilter === "active") {
+        clauses.push(
+          "is_dir = 0 AND EXISTS (SELECT 1 FROM documents d WHERE d.file_id = files.id)",
+        );
+      } else if (body.ignoredFilter === "ignored") {
+        clauses.push(
+          "is_dir = 0 AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.file_id = files.id)",
+        );
+      }
     }
     const where = clauses.length ? "WHERE " + clauses.join(" AND ") : "";
     const totalRow = db
@@ -549,6 +574,9 @@ function tableColumns(db, table) {
 
 function handleIngest(body, which) {
   const source = (body.source || "").trim();
+  // useIgnores defaults to true when absent — matches old behavior for any
+  // caller that hasn't been updated yet.
+  const applyIgnores = body.useIgnores !== false;
   const listing = resolveListingPath(source);
   if (!listing) {
     return {
@@ -564,12 +592,12 @@ function handleIngest(body, which) {
       return { ok: true, action: "vendors", listing, ...r, counts: tableCounts(db) };
     }
     if (which === "files") {
-      const r = ingestFiles(db, paths);
+      const r = ingestFiles(db, paths, { applyIgnores });
       return { ok: true, action: "files", listing, ...r, counts: tableCounts(db) };
     }
     if (which === "full") {
       const v = ingestVendors(db, paths);
-      const f = ingestFiles(db, paths);
+      const f = ingestFiles(db, paths, { applyIgnores });
       return {
         ok: true,
         action: "full",
@@ -691,6 +719,46 @@ function normalizeFolderName(raw) {
   // Cap length to avoid garbage; allow letters, digits, spaces, common punctuation.
   if (s.length > 128) return null;
   return s;
+}
+
+// --- Classifier rule editor ----------------------------------------------
+// Three YAML rule files (filename / content / product) are editable from
+// the UI. GET returns the parsed rule list; POST validates + writes back.
+
+const KIND_READERS = {
+  filename: readFilenameRules,
+  content:  readContentRulesRaw,
+  product:  readProductRulesRaw,
+};
+const KIND_WRITERS = {
+  filename: writeFilenameRules,
+  content:  writeContentRules,
+  product:  writeProductRules,
+};
+
+function handleListClassifierRules(kind) {
+  const reader = KIND_READERS[kind];
+  if (!reader) return { ok: false, error: `Unknown classifier kind: ${kind}` };
+  try {
+    const rules = reader();
+    return { ok: true, kind, meta: CLASSIFIER_KINDS[kind], rules };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function handleSaveClassifierRules(kind, body) {
+  const writer = KIND_WRITERS[kind];
+  if (!writer) return { ok: false, error: `Unknown classifier kind: ${kind}` };
+  if (!Array.isArray(body && body.rules)) {
+    return { ok: false, error: "Body must include `rules` array." };
+  }
+  try {
+    writer(body.rules);
+    return { ok: true, kind, count: body.rules.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 function handleListIgnoredFolders() {
@@ -816,6 +884,52 @@ function handleDashboard() {
       folders: db.prepare("SELECT COUNT(*) AS n FROM ignored_folders").get().n,
     };
 
+    // Files-in-scope split. "Active" = file has a documents row (will be
+    // classified/charted). "Ignored" = file row exists but no documents row,
+    // i.e. the ext is on ignored_file_types. Folder-ignored files don't
+    // reach the files table at all when ignores were applied at ingest, so
+    // they're invisible here — that's correct.
+    const totalFiles = db.prepare("SELECT COUNT(*) AS n FROM files WHERE is_dir = 0").get().n;
+    const activeFiles = db.prepare(
+      `SELECT COUNT(*) AS n FROM files f
+       WHERE f.is_dir = 0
+         AND EXISTS (SELECT 1 FROM documents d WHERE d.file_id = f.id)`,
+    ).get().n;
+    const ignoredFiles = totalFiles - activeFiles;
+
+    // KPIs surfaced as headline cards on the dashboard. Each "% with product"
+    // metric counts a doc as covered if it has at least one row in
+    // document_products (any confidence, any source).
+    function pctWithProduct(typeNames) {
+      const placeholders = typeNames.map(() => "?").join(",");
+      const total = db.prepare(
+        `SELECT COUNT(*) AS n FROM documents d
+         JOIN document_types dt ON dt.id = d.document_type_id
+         WHERE dt.name IN (${placeholders})`,
+      ).get(...typeNames).n;
+      const withProd = db.prepare(
+        `SELECT COUNT(*) AS n FROM documents d
+         JOIN document_types dt ON dt.id = d.document_type_id
+         WHERE dt.name IN (${placeholders})
+           AND EXISTS (SELECT 1 FROM document_products dp WHERE dp.document_id = d.id)`,
+      ).get(...typeNames).n;
+      return {
+        total,
+        withProduct: withProd,
+        pct: total > 0 ? (withProd / total) * 100 : 0,
+      };
+    }
+    const manualsWithProduct   = pctWithProduct(["installation_manual", "programming_manual", "operations_manual"]);
+    const datasheetsWithProduct = pctWithProduct(["datasheet"]);
+
+    const kpis = {
+      pctClassified: totalDocs > 0 ? (classifiedTotal / totalDocs) * 100 : 0,
+      vendors:       counts.vendors,
+      products:      counts.products,
+      manualsWithProduct,
+      datasheetsWithProduct,
+    };
+
     return {
       ok: true,
       counts,
@@ -826,6 +940,12 @@ function handleDashboard() {
         pctClassified: totalDocs > 0 ? (classifiedTotal / totalDocs) * 100 : 0,
       },
       ignored,
+      filesScope: {
+        total:    totalFiles,
+        active:   activeFiles,
+        ignored:  ignoredFiles,
+      },
+      kpis,
       byType,
     };
   } finally {
@@ -1249,9 +1369,8 @@ function handleUploadListing(body) {
     return { ok: false, error: "Invalid filename." };
   }
 
-  const uploadsDir = path.join(SERVER_DIR, "uploads");
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  const dest = path.join(uploadsDir, safe);
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  const dest = path.join(UPLOADS_DIR, safe);
 
   try {
     fs.writeFileSync(dest, content, "utf8");
@@ -1744,6 +1863,9 @@ const PAGE = String.raw`<!DOCTYPE html>
   /* ext-only is shown for files + documents (anything with a file_type column).
      Hidden on vendors / document_types where it makes no sense. */
   .toolbar .ext-only.hidden { display: none; }
+  /* files-only is shown only on the files table — the ignored/active filter
+     compares against the documents table and is meaningless elsewhere. */
+  .toolbar .files-only.hidden { display: none; }
 
   /* Custom multi-select dropdown. Native <select multiple> is awful UX on
      Windows, so we roll our own checkbox panel. */
@@ -1954,6 +2076,15 @@ const PAGE = String.raw`<!DOCTYPE html>
     display: block; color: var(--muted); font-size: 10px; font-weight: normal; margin-top: 2px;
   }
   aside .action-row.danger:hover .desc { color: rgba(255,255,255,0.85); }
+  /* Inline checkbox label inside the Ingest sub-menu — controls whether
+     ingest applies the ignored-types/folders lists. */
+  aside #use-ignores-wrap {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 8px 4px 26px; font-size: 12px; color: var(--muted);
+    cursor: pointer; user-select: none;
+  }
+  aside #use-ignores-wrap input { margin: 0; cursor: pointer; }
+  aside #use-ignores-wrap:hover { color: var(--text); }
   /* Progress fill on the Extracted status line: linear gradient with a
      hard stop at --progress so the row reads as a 0-100% bar. */
   .extract-status.with-progress {
@@ -1980,25 +2111,58 @@ const PAGE = String.raw`<!DOCTYPE html>
   #dashboard .dash-sub {
     color: var(--muted); font-size: 12px; margin: -6px 0 12px 0;
   }
-  #dash-counts {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 8px; margin-bottom: 8px;
+  /* KPI cards — headline metrics at the top of the dashboard. Bigger than
+     the record-counts row, with a subtitle line under each value. */
+  .dash-kpis-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px; margin-bottom: 18px;
   }
-  #dash-counts .dash-card {
+  .dash-kpis-grid .kpi-card {
     background: var(--inset); border: 1px solid var(--border);
-    border-radius: 4px; padding: 10px 12px;
+    border-radius: 4px; padding: 12px 14px;
   }
-  #dash-counts .dash-card .label {
+  .dash-kpis-grid .kpi-card .label {
     color: var(--muted); font-size: 11px; text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  #dash-counts .dash-card .value {
+  .dash-kpis-grid .kpi-card .value {
+    color: var(--accent); font-size: 28px; font-weight: 600; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .dash-kpis-grid .kpi-card .sub {
+    color: var(--muted); font-size: 11px; margin-top: 2px;
+  }
+
+  /* Two-column split: Ephemeral (data tables) | Canonical (curated/seed). */
+  #dash-counts-cols {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 18px; margin-bottom: 8px;
+  }
+  @media (max-width: 720px) {
+    #dash-counts-cols { grid-template-columns: 1fr; }
+  }
+  .dash-counts-col-h {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em; margin-bottom: 6px;
+  }
+  .dash-counts-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .dash-counts-grid .dash-card {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px;
+  }
+  .dash-counts-grid .dash-card .label {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .dash-counts-grid .dash-card .value {
     color: var(--text); font-size: 22px; font-weight: 600; margin-top: 4px;
     font-variant-numeric: tabular-nums;
   }
   #dash-class-summary {
     background: var(--inset); border: 1px solid var(--border);
-    border-radius: 4px; padding: 10px 12px; margin-bottom: 6px;
+    border-radius: 4px; padding: 10px 12px; margin-bottom: 18px;
     font-size: 13px; color: var(--text);
   }
   #dash-class-summary strong { color: var(--accent); }
@@ -2021,6 +2185,179 @@ const PAGE = String.raw`<!DOCTYPE html>
   table.dash-table td.zero { color: var(--muted); }
   table.dash-table td.pct { color: var(--muted); font-size: 11px; }
   table.dash-table tr.empty-type td { color: var(--muted); opacity: 0.55; }
+
+  /* Classifier rule editor table — wider, editable inputs in cells. */
+  table.cedit-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  table.cedit-table th {
+    color: var(--muted); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    background: var(--inset);
+    text-align: left; padding: 6px 6px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.cedit-table td {
+    padding: 4px 4px;
+    border-bottom: 1px solid var(--border-row);
+    vertical-align: middle;
+  }
+  table.cedit-table input,
+  table.cedit-table select {
+    width: 100%; box-sizing: border-box;
+    padding: 4px 6px; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset); color: var(--text);
+    font-family: inherit;
+  }
+  table.cedit-table input:focus,
+  table.cedit-table select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  /* Vendor-grouped layout for product rules. The group header is a
+     full-width clickable row with caret + vendor name + rule count. */
+  table.cedit-table tr.cedit-group-header td {
+    cursor: pointer; user-select: none;
+    background: var(--inset);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 8px;
+  }
+  table.cedit-table tr.cedit-group-header td:hover { background: var(--hover); }
+  table.cedit-table tr.cedit-group-header .caret {
+    color: var(--muted); font-size: 11px; margin-right: 8px;
+    display: inline-block; width: 12px;
+  }
+  table.cedit-table tr.cedit-group-header .vendor-name {
+    color: var(--accent); font-weight: 600; font-size: 13px;
+  }
+  table.cedit-table tr.cedit-group-header .rule-count {
+    color: var(--muted); font-size: 11px; margin-left: 10px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  table.cedit-table tr.cedit-group-body td:first-child { padding-left: 20px; }
+
+  table.cedit-table td.cedit-pattern { position: relative; }
+  table.cedit-table td.cedit-pattern input {
+    font-family: monospace; padding-right: 26px;
+  }
+  table.cedit-table td.cedit-pattern .rx-open {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    width: 20px; height: 20px; padding: 0; line-height: 18px; font-size: 13px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset); color: var(--muted); cursor: pointer;
+  }
+  table.cedit-table td.cedit-pattern .rx-open:hover {
+    background: var(--hover); color: var(--text); border-color: var(--accent);
+  }
+
+  /* Regex editor modal — opens from the pattern cell. */
+  .rx-modal { position: fixed; inset: 0; z-index: 1000; }
+  .rx-modal-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.35);
+  }
+  .rx-modal-panel {
+    position: relative; max-width: 880px; width: calc(100% - 40px);
+    margin: 5vh auto; max-height: 90vh; display: flex; flex-direction: column;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.25);
+  }
+  .rx-modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+  }
+  .rx-modal-header h3 { margin: 0; font-size: 15px; color: var(--accent); }
+  .rx-modal-x {
+    background: transparent; border: none; font-size: 22px; line-height: 1;
+    color: var(--muted); cursor: pointer; padding: 0 6px;
+  }
+  .rx-modal-x:hover { color: var(--text); }
+  .rx-modal-body {
+    display: grid; grid-template-columns: 1fr 320px; gap: 18px;
+    padding: 16px; overflow: auto;
+  }
+  @media (max-width: 720px) {
+    .rx-modal-body { grid-template-columns: 1fr; }
+  }
+  .rx-label {
+    display: block; font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+  }
+  #rx-pattern {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    font-family: monospace; font-size: 13px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset); color: var(--text);
+  }
+  #rx-pattern:focus, #rx-sample:focus { outline: none; border-color: var(--accent); }
+  #rx-pattern.invalid { border-color: var(--danger); background: var(--danger-bg); }
+  #rx-sample {
+    width: 100%; box-sizing: border-box;
+    font-family: monospace; font-size: 13px;
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset); color: var(--text);
+  }
+  .rx-error {
+    margin-top: 6px; padding: 6px 10px; font-size: 12px;
+    background: var(--danger-bg); color: var(--danger-text);
+    border: 1px solid var(--danger); border-radius: 3px; white-space: pre-wrap;
+  }
+  .rx-result {
+    margin-top: 6px; font-size: 12px; padding: 6px 10px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--inset); color: var(--muted); min-height: 22px;
+  }
+  .rx-result.match    { background: #e6f4e6; color: #1a5a1a; border-color: #4a9d4a; }
+  .rx-result.nomatch  { background: var(--danger-bg); color: var(--danger-text); border-color: var(--danger); }
+  .rx-result mark {
+    background: #ffeb78; color: var(--text); padding: 0 1px; border-radius: 2px;
+  }
+  .rx-modal-hints {
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 4px; padding: 10px 12px;
+    font-size: 12px; max-height: 65vh; overflow: auto;
+  }
+  .rx-hints-h {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em; margin-bottom: 6px;
+  }
+  dl.rx-hints { margin: 0; }
+  dl.rx-hints dt {
+    margin-top: 6px; font-family: monospace;
+  }
+  dl.rx-hints dt:first-child { margin-top: 0; }
+  dl.rx-hints dd {
+    margin: 1px 0 0 0; color: var(--muted); line-height: 1.4;
+  }
+  dl.rx-hints code, ul.rx-hints-list code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 2px; padding: 0 3px; font-family: monospace; font-size: 11px;
+    color: var(--text);
+  }
+  ul.rx-hints-list {
+    margin: 4px 0 0 18px; padding: 0; line-height: 1.5; color: var(--muted);
+  }
+  ul.rx-hints-list li { margin: 4px 0; }
+  .rx-modal-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 10px 16px; border-top: 1px solid var(--border);
+  }
+  .rx-modal-footer button { padding: 5px 14px; }
+  table.cedit-table tr.invalid td { background: var(--danger-bg); }
+  table.cedit-table td.cedit-actions {
+    text-align: right; white-space: nowrap; width: 96px;
+  }
+  table.cedit-table td.cedit-actions button {
+    padding: 2px 6px; font-size: 11px; margin-left: 2px;
+    background: var(--inset); border: 1px solid var(--border);
+    border-radius: 3px; cursor: pointer; color: var(--text);
+  }
+  table.cedit-table td.cedit-actions button:hover { background: var(--hover); }
+  table.cedit-table td.cedit-actions button.danger { color: var(--danger-text); }
+  table.cedit-table td.cedit-actions button.danger:hover { background: var(--danger); color: #fff; }
+  table.cedit-table td.cedit-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
 
   /* Help / welcome page styling. Readable prose, not a data grid. */
   #help-view { max-width: 760px; }
@@ -2054,7 +2391,7 @@ const PAGE = String.raw`<!DOCTYPE html>
     <div id="help-row" class="table-row" data-view="help">
       <span>🏠 Home</span>
     </div>
-    <details open>
+    <details>
       <summary>Charts</summary>
       <div id="charts-row" class="table-row" data-view="charts">
         <span>📊 All documents</span>
@@ -2082,8 +2419,21 @@ const PAGE = String.raw`<!DOCTYPE html>
       </div>
     </details>
 
-    <details open>
-      <summary>Tables</summary>
+    <details>
+      <summary>Classifiers</summary>
+      <div id="classifier-row-filename" class="table-row" data-classifier="filename">
+        <span>📝 Filename rules</span>
+      </div>
+      <div id="classifier-row-content" class="table-row" data-classifier="content">
+        <span>📄 Content rules</span>
+      </div>
+      <div id="classifier-row-product" class="table-row" data-classifier="product">
+        <span>🏷️ Product rules</span>
+      </div>
+    </details>
+
+    <details>
+      <summary>Ephemeral tables</summary>
       <div id="table-list"></div>
     </details>
 
@@ -2098,6 +2448,7 @@ const PAGE = String.raw`<!DOCTYPE html>
       </div>
       <button id="pick-listing" class="secondary">Choose folder…</button>
       <button id="rescan-listing" class="secondary">Rescan listing (regenerate basic_listing.txt)</button>
+      <h2 style="margin-top: 16px;">Canonical tables</h2>
       <table class="sidebar-summary">
         <tbody>
           <tr id="doctypes-row" data-table="document_types">
@@ -2120,23 +2471,29 @@ const PAGE = String.raw`<!DOCTYPE html>
       <summary>Actions</summary>
       <details class="action-sub">
         <summary>Purge</summary>
+        <div class="action-row danger" data-action="purge-all">Purge ALL tables</div>
         <div class="action-row danger" data-action="purge-vendors">Purge vendors</div>
         <div class="action-row danger" data-action="purge-files">Purge files</div>
-        <div class="action-row danger" data-action="purge-all">Purge ALL tables</div>
         <div class="action-row danger" data-action="purge-text-backups">
           Purge text backups
           <span class="desc">Delete the &lt;Vendors&gt;_text filesystem cache</span>
         </div>
       </details>
       <details class="action-sub">
-        <summary>Ingest</summary>
+        <summary>Full Process</summary>
         <div class="action-row headline" data-action="run-full-process">
-          Full Process
+          Run Full Process
           <span class="desc">Vendors + files + classify + extract + content classify</span>
         </div>
-        <div class="action-row" data-action="run-vendors">Run vendors ingest</div>
-        <div class="action-row" data-action="run-files">Run files ingest</div>
-        <div class="action-row" data-action="run-full">Full Run (vendors + files)</div>
+      </details>
+      <details class="action-sub">
+        <summary>Ingest</summary>
+        <label id="use-ignores-wrap" title="Apply the ignored types and ignored folders lists during file ingest">
+          <input type="checkbox" id="use-ignores" checked>
+          <span>Apply ignore lists</span>
+        </label>
+        <div class="action-row" data-action="run-vendors">Ingest Vendors</div>
+        <div class="action-row" data-action="run-files">Ingest Files</div>
       </details>
       <details class="action-sub">
         <summary>Classify &amp; Extract</summary>
@@ -2157,13 +2514,13 @@ const PAGE = String.raw`<!DOCTYPE html>
           <span class="desc">PDF-text rules; only fills empty / upgrades low</span>
         </div>
         <div class="action-row" data-action="classify-products">
-          Classify products
+          Extract products
           <span class="desc">Vendor-scoped rules; many-to-many to documents</span>
         </div>
       </details>
     </details>
 
-    <details open>
+    <details>
       <summary>Status</summary>
       <button id="refresh" class="secondary">Refresh status</button>
       <div id="classify-status" class="extract-status">Classified: …</div>
@@ -2197,6 +2554,11 @@ const PAGE = String.raw`<!DOCTYPE html>
         <option value="medium">≥ medium</option>
         <option value="high">high only</option>
       </select>
+      <select id="ignored-filter" class="files-only" title="Files in scope (active = has a documents row) vs ignored (extension on the ignore list at last ingest)">
+        <option value="all">All files</option>
+        <option value="active">Active only</option>
+        <option value="ignored">Ignored only</option>
+      </select>
       <button id="prev" disabled>&larr; Prev</button>
       <button id="next" disabled>Next &rarr;</button>
       <span class="meta" id="page-meta"></span>
@@ -2209,8 +2571,20 @@ const PAGE = String.raw`<!DOCTYPE html>
         <h2 class="dash-h">Dashboard</h2>
         <p class="dash-sub" id="dash-empty" style="display:none;">No data yet. Run an ingest to populate the database.</p>
 
+        <h3 class="dash-h">KPIs</h3>
+        <div id="dash-kpis" class="dash-kpis-grid"></div>
+
         <h3 class="dash-h">Record counts</h3>
-        <div id="dash-counts"></div>
+        <div id="dash-counts-cols">
+          <div class="dash-counts-col">
+            <div class="dash-counts-col-h">Ephemeral tables</div>
+            <div id="dash-counts-ephemeral" class="dash-counts-grid"></div>
+          </div>
+          <div class="dash-counts-col">
+            <div class="dash-counts-col-h">Canonical tables</div>
+            <div id="dash-counts-canonical" class="dash-counts-grid"></div>
+          </div>
+        </div>
 
         <h3 class="dash-h">Classification by document type</h3>
         <div id="dash-class-summary">…</div>
@@ -2228,6 +2602,12 @@ const PAGE = String.raw`<!DOCTYPE html>
           </thead>
           <tbody></tbody>
         </table>
+
+        <h3 class="dash-h">Files in scope</h3>
+        <p class="dash-sub" id="dash-files-summary">…</p>
+        <div id="dash-files-chart-wrap" style="max-width: 320px;">
+          <canvas id="dash-files-chart"></canvas>
+        </div>
       </div>
     </div>
     <div id="ignored-view" style="display:none; flex:1; overflow:auto; padding:24px 32px; max-width: 760px;">
@@ -2290,6 +2670,32 @@ const PAGE = String.raw`<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+    <div id="classifier-editor-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
+        <h2 id="cedit-title" style="color: var(--accent); margin: 0; font-size: 22px;">Filename rules</h2>
+        <div style="font-size:12px; color:var(--muted);" id="cedit-meta">…</div>
+      </div>
+      <p class="dash-sub" id="cedit-desc" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">…</p>
+
+      <div id="cedit-error" style="display:none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; white-space: pre-wrap;"></div>
+
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 14px;">
+        <button id="cedit-save"    class="secondary" style="padding: 5px 14px;" disabled>Save changes</button>
+        <button id="cedit-discard" class="secondary" style="padding: 5px 14px;" disabled>Discard</button>
+        <span id="cedit-dirty" style="color: var(--muted); font-size: 12px;"></span>
+        <span id="cedit-group-controls" style="margin-left:auto; display:none;">
+          <button id="cedit-expand-all"   class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Expand all</button>
+          <button id="cedit-collapse-all" class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Collapse all</button>
+        </span>
+      </div>
+
+      <table class="cedit-table" id="cedit-table">
+        <thead><tr id="cedit-thead-row"></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <button id="cedit-add" class="secondary" style="margin-top: 12px; padding: 5px 14px;">+ Add rule</button>
+    </div>
     <div id="chart-view" style="display:none; flex:1; overflow:auto; padding:14px;">
       <div id="chart-breadcrumb" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
         <span id="chart-crumb" style="font-size:13px; color:var(--text);">All documents</span>
@@ -2349,6 +2755,62 @@ const PAGE = String.raw`<!DOCTYPE html>
   </section>
 </main>
 
+<div id="regex-modal" class="rx-modal" style="display:none;">
+  <div class="rx-modal-backdrop"></div>
+  <div class="rx-modal-panel" role="dialog" aria-modal="true" aria-labelledby="rx-modal-title">
+    <div class="rx-modal-header">
+      <h3 id="rx-modal-title">Edit pattern</h3>
+      <button id="rx-modal-close" class="rx-modal-x" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="rx-modal-body">
+      <div class="rx-modal-col">
+        <label class="rx-label" for="rx-pattern">Pattern (JS regex, case-insensitive)</label>
+        <textarea id="rx-pattern" rows="3" spellcheck="false"></textarea>
+        <div id="rx-error" class="rx-error" style="display:none;"></div>
+
+        <label class="rx-label" for="rx-sample" style="margin-top:14px;">Test against sample</label>
+        <input id="rx-sample" type="text" placeholder="e.g. 5499_Datasheet.pdf" spellcheck="false">
+        <div id="rx-result" class="rx-result"></div>
+      </div>
+      <div class="rx-modal-hints">
+        <div class="rx-hints-h">Cheat sheet</div>
+        <dl class="rx-hints">
+          <dt><code>\b</code></dt>
+          <dd>Word boundary. Won't fire next to <code>_</code> (underscore is a word char).</dd>
+          <dt><code>(?:^|[\W_])</code></dt>
+          <dd>Start-of-string OR non-word OR <code>_</code>. Use as a left boundary that respects underscores.</dd>
+          <dt><code>(?:[\W_]|$)</code></dt>
+          <dd>Mirror right boundary.</dd>
+          <dt><code>[\s_-]*</code></dt>
+          <dd>Zero or more space / underscore / hyphen — separator-tolerant.</dd>
+          <dt><code>(?:foo|bar)</code></dt>
+          <dd>Non-capturing alternation.</dd>
+          <dt><code>[A-Z0-9]+</code></dt>
+          <dd>Char class (case-insensitive flag is always on).</dd>
+          <dt><code>\d{2,5}</code></dt>
+          <dd>2 to 5 digits.</dd>
+          <dt><code>?</code></dt>
+          <dd>Optional preceding token. <code>foo[\s_-]?bar</code> matches <code>foo bar</code>, <code>foo_bar</code>, or <code>foobar</code>.</dd>
+          <dt><code>^</code> / <code>$</code></dt>
+          <dd>Anchors. <code>^4850\b</code> requires the string to start with 4850.</dd>
+          <dt><code>\.(pdf|dwg)</code></dt>
+          <dd>Literal dot, then alternation.</dd>
+        </dl>
+        <div class="rx-hints-h" style="margin-top:14px;">Common patterns</div>
+        <ul class="rx-hints-list">
+          <li>Model code allowing <code>-</code> / <code>_</code> / space:<br><code>\bABC[\s_-]?123\b</code></li>
+          <li>Match in filename even after underscore prefix:<br><code>(?:^|[\W_])datasheet(?:[\W_]|$)</code></li>
+          <li>Vendor folder anywhere in path:<br><code>\\Vendors\\</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="rx-modal-footer">
+      <button id="rx-modal-cancel" class="secondary" type="button">Cancel</button>
+      <button id="rx-modal-save" class="secondary" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const state = {
   view: "table",         // "table" | "charts"
@@ -2365,6 +2827,7 @@ const state = {
   documentTypeFilters: [],  // multi-select: ['installation_manual', …]
   productFilter: "",        // single-select: 'NFS2-3030' (chart drilldown)
   hasProductFilter: "",     // 'yes' | 'no' | '' — chart drilldown only
+  ignoredFilter: "all",     // 'all' | 'active' | 'ignored' — files table only
   total: 0,
   // Chart-page drilldown filter chain. Independent from the table filters
   // above — switching to charts clears it. Drilldowns compose into this.
@@ -2407,12 +2870,19 @@ function setActiveTable(name) {
   state.documentTypeFilters = [];
   state.productFilter = "";
   state.hasProductFilter = "";
+  state.ignoredFilter = "all";
   document.getElementById("filter").value = "";
   document.getElementById("classified-filter").value = "all";
   document.getElementById("confidence-filter").value = "all";
+  document.getElementById("ignored-filter").value = "all";
   refreshMultiButton("filetype");
   refreshMultiButton("doctype");
   // Highlight only the matching row across both Views and Tables groups.
+  // The Source data summary table has its own <tr data-table="document_types">
+  // row that should also light up when document_types is the active table.
+  document.querySelectorAll(".sidebar-summary tr").forEach((el) => {
+    el.classList.toggle("active", el.dataset.table === name);
+  });
   document.querySelectorAll(".table-row").forEach((el) => {
     el.classList.toggle("active",
       el.dataset.table === name && el.dataset.view !== "charts");
@@ -2420,15 +2890,20 @@ function setActiveTable(name) {
   document.getElementById("charts-row").classList.remove("active");
   document.querySelectorAll(".chart-preset").forEach((el) => el.classList.remove("active"));
   // Visibility of per-table controls.
-  // docs-only: classified + confidence dropdowns (documents only).
-  // ext-only:  file-type dropdown (files + documents — anything with extensions).
-  const showDocsControls = name === "documents";
-  const showExtControls  = name === "documents" || name === "files";
+  // docs-only:  classified + confidence dropdowns (documents only).
+  // ext-only:   file-type dropdown (files + documents — anything with extensions).
+  // files-only: ignored/active filter (files only — needs to compare against documents table).
+  const showDocsControls  = name === "documents";
+  const showExtControls   = name === "documents" || name === "files";
+  const showFilesControls = name === "files";
   for (const el of document.querySelectorAll(".toolbar .docs-only")) {
     el.classList.toggle("hidden", !showDocsControls);
   }
   for (const el of document.querySelectorAll(".toolbar .ext-only")) {
     el.classList.toggle("hidden", !showExtControls);
+  }
+  for (const el of document.querySelectorAll(".toolbar .files-only")) {
+    el.classList.toggle("hidden", !showFilesControls);
   }
   showTableView();
   loadRows();
@@ -2449,12 +2924,12 @@ function setActiveCharts(preset) {
   if (preset && typeof preset === "object") {
     Object.assign(state.chartFilter, preset);
   }
-  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
     el.classList.remove("active");
   });
   document.getElementById("charts-row").classList.add("active");
   // Hide all per-table filters on the chart view — charts have their own breadcrumb.
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
   showChartView();
@@ -2475,11 +2950,12 @@ const CHART_PRESETS = {
 };
 
 function hideAllViews() {
-  document.getElementById("table-view").style.display           = "none";
-  document.getElementById("chart-view").style.display           = "none";
-  document.getElementById("help-view").style.display            = "none";
-  document.getElementById("ignored-view").style.display         = "none";
-  document.getElementById("ignored-folders-view").style.display = "none";
+  document.getElementById("table-view").style.display              = "none";
+  document.getElementById("chart-view").style.display              = "none";
+  document.getElementById("help-view").style.display               = "none";
+  document.getElementById("ignored-view").style.display            = "none";
+  document.getElementById("ignored-folders-view").style.display    = "none";
+  document.getElementById("classifier-editor-view").style.display  = "none";
 }
 
 function showTableView() {
@@ -2533,12 +3009,12 @@ function showIgnoredFoldersView() {
 
 function setActiveHelp() {
   state.view = "help";
-  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
     el.classList.remove("active");
   });
   const helpRow = document.getElementById("help-row");
   if (helpRow) helpRow.classList.add("active");
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
   showHelpView();
@@ -2547,12 +3023,12 @@ function setActiveHelp() {
 
 function setActiveIgnored() {
   state.view = "ignored";
-  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
     el.classList.remove("active");
   });
   const row = document.getElementById("ignored-row");
   if (row) row.classList.add("active");
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
   showIgnoredView();
@@ -2561,12 +3037,12 @@ function setActiveIgnored() {
 
 function setActiveIgnoredFolders() {
   state.view = "ignored-folders";
-  document.querySelectorAll(".table-row, .chart-preset").forEach((el) => {
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
     el.classList.remove("active");
   });
   const row = document.getElementById("ignored-folders-row");
   if (row) row.classList.add("active");
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
   showIgnoredFoldersView();
@@ -2663,14 +3139,486 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+// --- Classifier rule editor ----------------------------------------------
+// One generic table editor that switches column layout based on the kind
+// (filename / content / product). State is held in cedit.* — a snapshot of
+// the rule list returned by the API plus an edit-in-progress copy. Save
+// validates server-side; failures stay in the UI without touching disk.
+
+const cedit = {
+  kind: null,                // "filename" | "content" | "product"
+  meta: null,                // server-supplied meta (label, columns, enums)
+  pristine: [],              // last-saved rule snapshot, deep-cloned
+  rules: [],                 // current edit buffer (array of plain objects)
+};
+
+const CEDIT_KIND_DESC = {
+  filename: "Rules run in order against each file. First match wins. The match field selects which string to test (name / parent / path / file_type). Pattern is a JS regex (case-insensitive).",
+  content:  "Rules run against extracted PDF text. first_page matches the first page only; extract matches the full body. Only fires against documents that are unclassified or low-confidence.",
+  product:  "Vendor-scoped rules linking documents to (vendor, product). A single document can match multiple products. The match field selects name / path / first_page / extract.",
+};
+
+function ceditIsDirty() {
+  return JSON.stringify(cedit.rules) !== JSON.stringify(cedit.pristine);
+}
+
+function ceditUpdateButtons() {
+  const dirty = ceditIsDirty();
+  document.getElementById("cedit-save").disabled    = !dirty;
+  document.getElementById("cedit-discard").disabled = !dirty;
+  document.getElementById("cedit-dirty").textContent = dirty ? "● unsaved changes" : "";
+}
+
+function setActiveClassifierEditor(kind) {
+  if (cedit.kind && ceditIsDirty()) {
+    if (!window.confirm("You have unsaved changes to the " + cedit.kind + " rules. Discard?")) {
+      // Re-highlight the current row — user cancelled the navigation.
+      document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) =>
+        el.classList.remove("active"));
+      const cur = document.getElementById("classifier-row-" + cedit.kind);
+      if (cur) cur.classList.add("active");
+      return;
+    }
+  }
+  state.view = "classifier-editor";
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("classifier-row-" + kind);
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
+    el.classList.add("hidden");
+  }
+  hideAllViews();
+  document.getElementById("classifier-editor-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+  loadClassifierRules(kind);
+}
+
+async function loadClassifierRules(kind) {
+  const errEl = document.getElementById("cedit-error");
+  errEl.style.display = "none";
+  errEl.textContent = "";
+
+  let r;
+  try { r = await api("/api/classifier-rules/" + kind); }
+  catch (e) {
+    showCeditError("Failed to load rules: " + (e.message || e));
+    return;
+  }
+  if (!r.ok) { showCeditError(r.error || "Load failed."); return; }
+
+  cedit.kind     = kind;
+  cedit.meta     = r.meta;
+  cedit.pristine = JSON.parse(JSON.stringify(r.rules));
+  cedit.rules    = JSON.parse(JSON.stringify(r.rules));
+  // Switching classifiers resets which vendor groups are expanded.
+  ceditOpenVendors.clear();
+
+  document.getElementById("cedit-title").textContent = r.meta.label;
+  document.getElementById("cedit-meta").textContent  = r.meta.file + " · " + r.rules.length + " rule" + (r.rules.length === 1 ? "" : "s");
+  document.getElementById("cedit-desc").textContent  = CEDIT_KIND_DESC[kind] || "";
+
+  // Expand/Collapse-all only makes sense for the grouped product view.
+  const groupCtrls = document.getElementById("cedit-group-controls");
+  if (groupCtrls) groupCtrls.style.display = kind === "product" ? "" : "none";
+
+  renderCeditTable();
+  ceditUpdateButtons();
+}
+
+function showCeditError(msg) {
+  const el = document.getElementById("cedit-error");
+  el.style.display = "block";
+  el.textContent = msg;
+}
+
+function renderCeditTable() {
+  const thead = document.getElementById("cedit-thead-row");
+  const tbody = document.querySelector("#cedit-table tbody");
+  if (!thead || !tbody) return;
+
+  // Header row: column labels + a final actions column.
+  thead.innerHTML = "";
+  for (const col of cedit.meta.columns) {
+    const th = document.createElement("th");
+    th.textContent = col.replace(/_/g, " ");
+    thead.appendChild(th);
+  }
+  const thAct = document.createElement("th");
+  thAct.textContent = "";
+  thAct.style.textAlign = "right";
+  thead.appendChild(thAct);
+
+  tbody.innerHTML = "";
+  if (cedit.rules.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = cedit.meta.columns.length + 1;
+    td.style.color = "var(--muted)";
+    td.style.textAlign = "center";
+    td.style.padding = "24px";
+    td.textContent = "No rules yet. Click + Add rule to start.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+
+  // Product rules are vendor-scoped — rules only fire against documents
+  // whose vendor matches. Render them grouped under collapsible vendor
+  // sections so the list is scannable. Filename/content rules don't have
+  // vendor column — keep the flat layout.
+  if (cedit.kind === "product" && cedit.meta.columns.includes("vendor")) {
+    renderCeditGroupedByVendor(tbody);
+  } else {
+    for (let i = 0; i < cedit.rules.length; i++) {
+      tbody.appendChild(renderCeditRow(i));
+    }
+  }
+}
+
+// Walk the rules array in order, breaking into runs by vendor. Each run
+// becomes a collapsible group. Persists open/closed state per vendor in
+// the in-memory ceditOpenVendors set so re-render after edits doesn't
+// collapse the section the user is working in.
+const ceditOpenVendors = new Set();
+
+function renderCeditGroupedByVendor(tbody) {
+  // Group consecutive rules by vendor while preserving original indices.
+  // (Non-consecutive rules with the same vendor become separate groups —
+  // visual cue that something is out of order.)
+  const groups = [];
+  let cur = null;
+  for (let i = 0; i < cedit.rules.length; i++) {
+    const v = cedit.rules[i].vendor || "(no vendor)";
+    if (!cur || cur.vendor !== v) {
+      cur = { vendor: v, indices: [] };
+      groups.push(cur);
+    }
+    cur.indices.push(i);
+  }
+
+  // Merge contiguous groups for display: aggregate count by vendor name,
+  // but keep indices ordered. (We DON'T reorder rules — the YAML order
+  // wins, the UI just renders.)
+  const colSpan = cedit.meta.columns.length + 1;
+
+  for (const g of groups) {
+    // Group header row — clickable, toggles open/closed.
+    const headerRow = document.createElement("tr");
+    headerRow.className = "cedit-group-header";
+    const headerTd = document.createElement("td");
+    headerTd.colSpan = colSpan;
+    const isOpen = ceditOpenVendors.has(g.vendor);
+    headerTd.innerHTML =
+      '<span class="caret">' + (isOpen ? "▾" : "▸") + '</span>' +
+      '<span class="vendor-name">' + escapeHtml(g.vendor) + '</span>' +
+      '<span class="rule-count">' + g.indices.length + ' rule' + (g.indices.length === 1 ? '' : 's') + '</span>';
+    headerTd.addEventListener("click", () => {
+      if (ceditOpenVendors.has(g.vendor)) ceditOpenVendors.delete(g.vendor);
+      else ceditOpenVendors.add(g.vendor);
+      renderCeditTable();
+    });
+    headerRow.appendChild(headerTd);
+    tbody.appendChild(headerRow);
+
+    if (!isOpen) continue;
+
+    for (const i of g.indices) {
+      const row = renderCeditRow(i);
+      row.classList.add("cedit-group-body");
+      tbody.appendChild(row);
+    }
+  }
+}
+
+function renderCeditRow(i) {
+  const rule = cedit.rules[i];
+  const tr = document.createElement("tr");
+  for (const col of cedit.meta.columns) {
+    const td = document.createElement("td");
+    if (col === "pattern") td.classList.add("cedit-pattern");
+    let input;
+    if (col === "confidence") {
+      input = document.createElement("select");
+      for (const v of cedit.meta.confidences) {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = v;
+        input.appendChild(o);
+      }
+    } else if (col === "match") {
+      input = document.createElement("select");
+      for (const v of cedit.meta.matches) {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = v;
+        input.appendChild(o);
+      }
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+    }
+    input.value = rule[col] != null ? String(rule[col]) : "";
+    input.addEventListener("input", () => {
+      rule[col] = input.value;
+      ceditUpdateButtons();
+    });
+    input.addEventListener("change", () => {
+      rule[col] = input.value;
+      ceditUpdateButtons();
+      // Editing the vendor field changes which group this rule belongs to.
+      // Auto-open the new group and re-render so the user can keep editing.
+      if (col === "vendor" && cedit.kind === "product") {
+        ceditOpenVendors.add(input.value || "(no vendor)");
+        renderCeditTable();
+      }
+    });
+    td.appendChild(input);
+    // Pattern cells get a small ⋯ trigger that opens the regex modal.
+    // Inline edit still works for short tweaks; the modal is for room +
+    // sample-testing + cheat sheet.
+    if (col === "pattern") {
+      const opener = document.createElement("button");
+      opener.type = "button";
+      opener.className = "rx-open";
+      opener.textContent = "⋯";
+      opener.title = "Open pattern editor";
+      opener.addEventListener("click", (e) => {
+        e.preventDefault();
+        openRegexModal(input.value || "", (newVal) => {
+          input.value = newVal;
+          rule[col] = newVal;
+          ceditUpdateButtons();
+        });
+      });
+      td.appendChild(opener);
+    }
+    tr.appendChild(td);
+  }
+  // Actions column: ↑ ↓ ×
+  const tdAct = document.createElement("td");
+  tdAct.className = "cedit-actions";
+  const btnUp   = document.createElement("button");
+  const btnDown = document.createElement("button");
+  const btnDel  = document.createElement("button");
+  btnUp.textContent = "↑";   btnUp.title   = "Move up";
+  btnDown.textContent = "↓"; btnDown.title = "Move down";
+  btnDel.textContent = "×";  btnDel.title  = "Delete rule";
+  btnDel.classList.add("danger");
+  btnUp.disabled   = i === 0;
+  btnDown.disabled = i === cedit.rules.length - 1;
+  btnUp.addEventListener("click", () => {
+    if (i === 0) return;
+    [cedit.rules[i - 1], cedit.rules[i]] = [cedit.rules[i], cedit.rules[i - 1]];
+    renderCeditTable();
+    ceditUpdateButtons();
+  });
+  btnDown.addEventListener("click", () => {
+    if (i === cedit.rules.length - 1) return;
+    [cedit.rules[i + 1], cedit.rules[i]] = [cedit.rules[i], cedit.rules[i + 1]];
+    renderCeditTable();
+    ceditUpdateButtons();
+  });
+  btnDel.addEventListener("click", () => {
+    if (!window.confirm("Delete rule " + (rule.id || "(unnamed)") + "?")) return;
+    cedit.rules.splice(i, 1);
+    renderCeditTable();
+    ceditUpdateButtons();
+  });
+  tdAct.appendChild(btnUp);
+  tdAct.appendChild(btnDown);
+  tdAct.appendChild(btnDel);
+  tr.appendChild(tdAct);
+  return tr;
+}
+
+function ceditAddRule() {
+  // Build a blank rule with sensible defaults.
+  const blank = {};
+  for (const col of cedit.meta.columns) {
+    if (col === "confidence") blank[col] = "medium";
+    else if (col === "match") blank[col] = cedit.meta.matches[0];
+    else blank[col] = "";
+  }
+  cedit.rules.push(blank);
+  // For grouped (product) view: auto-open the group the new row lands in
+  // so it's immediately visible — empty vendor → "(no vendor)" bucket.
+  if (cedit.kind === "product") {
+    ceditOpenVendors.add(blank.vendor || "(no vendor)");
+  }
+  renderCeditTable();
+  ceditUpdateButtons();
+}
+
+async function ceditSave() {
+  const errEl = document.getElementById("cedit-error");
+  errEl.style.display = "none";
+  errEl.textContent = "";
+  let r;
+  try { r = await api("/api/classifier-rules/" + cedit.kind, { rules: cedit.rules }); }
+  catch (e) { showCeditError("Save failed: " + (e.message || e)); return; }
+  if (!r.ok) { showCeditError(r.error || "Save failed."); return; }
+  cedit.pristine = JSON.parse(JSON.stringify(cedit.rules));
+  ceditUpdateButtons();
+  log("saved " + cedit.kind + " rules · " + r.count + " rule" + (r.count === 1 ? "" : "s"), "ok");
+  // Update count in title meta.
+  const meta = document.getElementById("cedit-meta");
+  if (meta && cedit.meta) {
+    meta.textContent = cedit.meta.file + " · " + r.count + " rule" + (r.count === 1 ? "" : "s");
+  }
+}
+
+function ceditDiscard() {
+  if (!window.confirm("Discard your changes and reload from disk?")) return;
+  cedit.rules = JSON.parse(JSON.stringify(cedit.pristine));
+  document.getElementById("cedit-error").style.display = "none";
+  renderCeditTable();
+  ceditUpdateButtons();
+}
+
+// --- Regex pattern modal ------------------------------------------------
+// Opened from the cedit pattern cells (small ⋯ button). Shows the pattern
+// in a roomy textarea, validates on every keystroke, lets you test against
+// a sample string, and offers a cheat-sheet panel of common idioms.
+//
+// onSave fires only when the user clicks Save AND the regex parses; the
+// caller writes the new value back into the row + state.
+
+let rxModalOnSave = null;          // (newPattern: string) => void
+let rxModalOriginal = "";          // initial value, for Cancel comparison
+
+function openRegexModal(initialPattern, onSave) {
+  rxModalOnSave = onSave || null;
+  rxModalOriginal = initialPattern || "";
+  const modal  = document.getElementById("regex-modal");
+  const ta     = document.getElementById("rx-pattern");
+  const sample = document.getElementById("rx-sample");
+  if (!modal || !ta || !sample) return;
+  ta.value = rxModalOriginal;
+  sample.value = "";
+  rxValidateAndShow();
+  modal.style.display = "block";
+  // Focus + select so common case (replace whole pattern) is one keystroke.
+  setTimeout(() => { ta.focus(); ta.select(); }, 0);
+}
+
+function closeRegexModal() {
+  const modal = document.getElementById("regex-modal");
+  if (modal) modal.style.display = "none";
+  rxModalOnSave = null;
+}
+
+// Run on every keystroke. Updates: parse error message, sample-test result.
+function rxValidateAndShow() {
+  const ta     = document.getElementById("rx-pattern");
+  const errEl  = document.getElementById("rx-error");
+  const result = document.getElementById("rx-result");
+  const sample = document.getElementById("rx-sample");
+  if (!ta || !errEl || !result || !sample) return;
+
+  const pat = ta.value;
+  let re = null;
+  if (pat.length === 0) {
+    ta.classList.remove("invalid");
+    errEl.style.display = "none";
+  } else {
+    try {
+      re = new RegExp(pat, "i");
+      ta.classList.remove("invalid");
+      errEl.style.display = "none";
+    } catch (e) {
+      ta.classList.add("invalid");
+      errEl.textContent = "Regex error: " + e.message;
+      errEl.style.display = "block";
+    }
+  }
+
+  // Sample test (only meaningful when both regex parses and sample exists).
+  result.classList.remove("match", "nomatch");
+  result.innerHTML = "";
+  if (!re) {
+    result.textContent = pat.length === 0 ? "Enter a pattern…" : "Fix the regex above to test.";
+    return;
+  }
+  const s = sample.value;
+  if (s.length === 0) {
+    result.textContent = "Type a sample to test against.";
+    return;
+  }
+  const m = s.match(re);
+  if (!m) {
+    result.classList.add("nomatch");
+    result.textContent = "no match";
+    return;
+  }
+  result.classList.add("match");
+  // Render the sample with the matched span highlighted via <mark>.
+  const start = m.index;
+  const end   = start + m[0].length;
+  const before = s.slice(0, start);
+  const hit    = s.slice(start, end);
+  const after  = s.slice(end);
+  result.innerHTML = "match: " +
+    escapeHtml(before) +
+    '<mark>' + escapeHtml(hit) + '</mark>' +
+    escapeHtml(after);
+}
+
+// Wire up modal — once at page load.
+(function initRegexModal() {
+  const modal  = document.getElementById("regex-modal");
+  const ta     = document.getElementById("rx-pattern");
+  const sample = document.getElementById("rx-sample");
+  const xBtn   = document.getElementById("rx-modal-close");
+  const cancel = document.getElementById("rx-modal-cancel");
+  const save   = document.getElementById("rx-modal-save");
+  const backdrop = modal && modal.querySelector(".rx-modal-backdrop");
+  if (!modal || !ta || !sample || !xBtn || !cancel || !save) return;
+
+  ta.addEventListener("input",     rxValidateAndShow);
+  sample.addEventListener("input", rxValidateAndShow);
+  xBtn.addEventListener("click",   closeRegexModal);
+  cancel.addEventListener("click", closeRegexModal);
+  if (backdrop) backdrop.addEventListener("click", closeRegexModal);
+
+  save.addEventListener("click", () => {
+    const pat = ta.value;
+    // Block save when regex doesn't parse — empty is allowed (the caller
+    // can decide how to handle that; the rule loader will reject it).
+    if (pat.length > 0) {
+      try { new RegExp(pat, "i"); }
+      catch (e) {
+        ta.classList.add("invalid");
+        const errEl = document.getElementById("rx-error");
+        if (errEl) {
+          errEl.textContent = "Regex error: " + e.message;
+          errEl.style.display = "block";
+        }
+        return;
+      }
+    }
+    if (rxModalOnSave) rxModalOnSave(pat);
+    closeRegexModal();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (modal.style.display === "none") return;
+    if (e.key === "Escape") closeRegexModal();
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) save.click();
+  });
+})();
+
 // Renders the Home dashboard: per-table counts + per-doctype confidence mix.
 // Idempotent — called every time Home is opened so numbers reflect current DB.
 async function loadDashboard() {
-  const countsEl = document.getElementById("dash-counts");
-  const tbody    = document.querySelector("#dash-types-table tbody");
-  const summary  = document.getElementById("dash-class-summary");
-  const empty    = document.getElementById("dash-empty");
-  if (!countsEl || !tbody || !summary) return;
+  const ephemeralEl = document.getElementById("dash-counts-ephemeral");
+  const canonicalEl = document.getElementById("dash-counts-canonical");
+  const tbody       = document.querySelector("#dash-types-table tbody");
+  const summary     = document.getElementById("dash-class-summary");
+  const empty       = document.getElementById("dash-empty");
+  if (!ephemeralEl || !canonicalEl || !tbody || !summary) return;
 
   let r;
   try {
@@ -2680,22 +3628,85 @@ async function loadDashboard() {
     return;
   }
 
-  // Counts grid — table counts (alphabetized, like the sidebar) + the two
-  // ignore-list sizes appended at the end so they're visually grouped.
-  countsEl.innerHTML = "";
-  const entries = Object.entries(r.counts).sort(([a], [b]) => a.localeCompare(b));
+  // Two columns:
+  //   Ephemeral — populated from ingest/classify, wiped on Purge ALL.
+  //   Canonical — taxonomy + user-curated ignore lists, persistent.
+  const CANONICAL = new Set(["document_types"]);
+  const ephemeral = [];
+  const canonical = [];
+  for (const [tbl, n] of Object.entries(r.counts)) {
+    (CANONICAL.has(tbl) ? canonical : ephemeral).push([tbl, n]);
+  }
+  ephemeral.sort(([a], [b]) => a.localeCompare(b));
+  canonical.sort(([a], [b]) => a.localeCompare(b));
   if (r.ignored) {
-    entries.push(["ignored types",   r.ignored.types   || 0]);
-    entries.push(["ignored folders", r.ignored.folders || 0]);
+    canonical.push(["ignored_file_types",   r.ignored.types   || 0]);
+    canonical.push(["ignored_folders",      r.ignored.folders || 0]);
   }
-  for (const [tbl, n] of entries) {
-    const card = document.createElement("div");
-    card.className = "dash-card";
-    card.innerHTML =
-      '<div class="label">' + tbl + '</div>' +
-      '<div class="value">' + Number(n).toLocaleString() + '</div>';
-    countsEl.appendChild(card);
+  function renderCards(host, entries) {
+    host.innerHTML = "";
+    for (const [tbl, n] of entries) {
+      const card = document.createElement("div");
+      card.className = "dash-card";
+      card.innerHTML =
+        '<div class="label">' + tbl + '</div>' +
+        '<div class="value">' + Number(n).toLocaleString() + '</div>';
+      host.appendChild(card);
+    }
   }
+
+  function renderKpis(kpis) {
+    const host = document.getElementById("dash-kpis");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!kpis) return;
+    const fmtN  = (n) => Number(n || 0).toLocaleString();
+    const fmtPct = (p) => (p == null ? "—" : Number(p).toFixed(1) + "%");
+
+    const cards = [
+      {
+        label: "Documents classified",
+        value: fmtPct(kpis.pctClassified),
+      },
+      {
+        label: "Vendors",
+        value: fmtN(kpis.vendors),
+      },
+      {
+        label: "Products extracted",
+        value: fmtN(kpis.products),
+      },
+      {
+        label: "Manuals with a product",
+        value: fmtPct(kpis.manualsWithProduct.pct),
+        sub: fmtN(kpis.manualsWithProduct.withProduct) + " / " + fmtN(kpis.manualsWithProduct.total)
+             + "  · install/program/operations",
+      },
+      {
+        label: "Datasheets with a product",
+        value: fmtPct(kpis.datasheetsWithProduct.pct),
+        sub: fmtN(kpis.datasheetsWithProduct.withProduct) + " / " + fmtN(kpis.datasheetsWithProduct.total),
+      },
+    ];
+    for (const k of cards) {
+      const card = document.createElement("div");
+      card.className = "kpi-card";
+      let html =
+        '<div class="label">' + k.label + '</div>' +
+        '<div class="value">' + k.value + '</div>';
+      if (k.sub) html += '<div class="sub">' + k.sub + '</div>';
+      card.innerHTML = html;
+      host.appendChild(card);
+    }
+  }
+  renderCards(ephemeralEl, ephemeral);
+  renderCards(canonicalEl, canonical);
+
+  // KPI cards — headline metrics. Order intentionally: classification
+  // rate first (overall pipeline health), then taxonomy breadth (vendors,
+  // products), then product-coverage rates for the two doc-type families
+  // most likely to be tied to a product.
+  renderKpis(r.kpis);
 
   // Classification summary line.
   const c = r.classification;
@@ -2727,6 +3738,65 @@ async function loadDashboard() {
       '<td>' + fmtN(t.low)    + ' <span class="pct">' + fmtPct(t.pctLow)    + '</span></td>';
     tbody.appendChild(tr);
   }
+
+  // Files-in-scope doughnut: active (has documents row) vs ignored (file
+  // exists but no documents row, ie. extension on the ignore list).
+  renderFilesScopeChart(r.filesScope);
+}
+
+function renderFilesScopeChart(scope) {
+  const summary = document.getElementById("dash-files-summary");
+  const wrap    = document.getElementById("dash-files-chart-wrap");
+  const canvas  = document.getElementById("dash-files-chart");
+  if (!summary || !wrap || !canvas) return;
+  if (!scope || !scope.total) {
+    summary.textContent = "No files yet.";
+    wrap.style.display = "none";
+    if (liveCharts["dash-files-chart"]) {
+      liveCharts["dash-files-chart"].destroy();
+      delete liveCharts["dash-files-chart"];
+    }
+    return;
+  }
+  wrap.style.display = "";
+  const pctIgnored = scope.total > 0 ? (scope.ignored / scope.total) * 100 : 0;
+  summary.innerHTML =
+    '<strong>' + scope.active.toLocaleString() + '</strong> active · ' +
+    '<strong>' + scope.ignored.toLocaleString() + '</strong> ignored ' +
+    '(' + pctIgnored.toFixed(1) + '%) of ' +
+    scope.total.toLocaleString() + ' files. Ignored = file row exists but no documents row (extension on the ignore list at last ingest).';
+
+  if (liveCharts["dash-files-chart"]) {
+    liveCharts["dash-files-chart"].destroy();
+    delete liveCharts["dash-files-chart"];
+  }
+  liveCharts["dash-files-chart"] = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels: ["Active (in scope)", "Ignored (no documents row)"],
+      datasets: [{
+        data:   [scope.active, scope.ignored],
+        backgroundColor: ["#4a9d4a", "#5a5563"],
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 12 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const n = ctx.parsed;
+              const pct = scope.total > 0 ? ((n / scope.total) * 100).toFixed(1) : "0";
+              return ctx.label + ": " + n.toLocaleString() + " (" + pct + "%)";
+            },
+          },
+        },
+      },
+    },
+  });
 }
 
 async function refreshStatus() {
@@ -2737,10 +3807,11 @@ async function refreshStatus() {
   const list = document.getElementById("table-list");
   list.innerHTML = "";
   // Alphabetize the sidebar so users find tables by name, not by the order
-  // tableCounts() happened to enumerate them.
-  const entries = Object.entries(r.counts).sort(
-    ([a], [b]) => a.localeCompare(b),
-  );
+  // tableCounts() happened to enumerate them. Skip document_types — it's a
+  // canonical/curated table, displayed in the Source data section instead.
+  const entries = Object.entries(r.counts)
+    .filter(([tbl]) => tbl !== "document_types")
+    .sort(([a], [b]) => a.localeCompare(b));
   for (const [tbl, n] of entries) {
     const row = document.createElement("div");
     row.className = "table-row" + (state.table === tbl ? " active" : "");
@@ -2751,7 +3822,7 @@ async function refreshStatus() {
   }
 
   updateClassifyStatus(r.classification);
-  updateIgnoredCounts(r.ignored);
+  updateSidebarSummary(r);
 }
 
 // Light-weight version: just refresh the row counts beside each table.
@@ -2770,15 +3841,20 @@ async function refreshTableCounts() {
     if (span) span.textContent = String(r.counts[tbl]);
   }
   updateClassifyStatus(r.classification);
-  updateIgnoredCounts(r.ignored);
+  updateSidebarSummary(r);
 }
 
-function updateIgnoredCounts(ig) {
-  if (!ig) return;
-  const t = document.getElementById("ignored-types-count");
-  const f = document.getElementById("ignored-folders-count");
-  if (t) t.textContent = String(ig.types || 0);
-  if (f) f.textContent = String(ig.folders || 0);
+// Update the Source data summary table (document types + the two ignore lists).
+function updateSidebarSummary(r) {
+  if (!r) return;
+  const dt = document.getElementById("doctypes-count");
+  if (dt && r.counts) dt.textContent = String(r.counts.document_types ?? 0);
+  if (r.ignored) {
+    const t = document.getElementById("ignored-types-count");
+    const f = document.getElementById("ignored-folders-count");
+    if (t) t.textContent = String(r.ignored.types || 0);
+    if (f) f.textContent = String(r.ignored.folders || 0);
+  }
 }
 
 function updateClassifyStatus(c) {
@@ -2891,6 +3967,7 @@ async function loadRows() {
     documentTypeFilters: state.documentTypeFilters,
     productFilter: state.productFilter,
     hasProductFilter: state.hasProductFilter,
+    ignoredFilter: state.ignoredFilter,
   });
   const thead = document.querySelector("#data-table thead");
   const tbody = document.querySelector("#data-table tbody");
@@ -3134,7 +4211,7 @@ function drillToDocuments(delta) {
   });
   document.getElementById("charts-row").classList.remove("active");
   document.querySelectorAll(".chart-preset").forEach((el) => el.classList.remove("active"));
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.remove("hidden");
   }
   showTableView();
@@ -3616,18 +4693,29 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;");
 }
 
+// Reads the "Apply ignore lists" checkbox in the Ingest menu. Defaults to
+// true when the element doesn't exist (defensive — legacy callers).
+function getUseIgnores() {
+  const el = document.getElementById("use-ignores");
+  return el ? !!el.checked : true;
+}
+
 async function runIngest(which) {
   const source = state.listingPath;
   if (!source) { log("No listing selected. Click 'Choose file…' first.", "err"); return; }
-  log("Running " + which + " ingest…", "info");
+  const useIgnores = getUseIgnores();
+  log("Running " + which + " ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
   setIngestEnabled(false);
   try {
-    const r = await api("/api/ingest", { which, source });
+    const r = await api("/api/ingest", { which, source, useIgnores });
     if (!r.ok) { log(r.error, "err"); return; }
     if (which === "vendors") {
       log("vendors: +" + r.addedVendors + " new, " + r.skippedPaths + " paths skipped", "ok");
     } else if (which === "files") {
-      log("files: " + r.files + " rows written, " + r.skippedPaths + " paths skipped", "ok");
+      const ignoreNote = (r.folderSkipped || r.docsSkipped)
+        ? " · ignore: " + (r.folderSkipped || 0) + " by folder, " + (r.docsSkipped || 0) + " no-doc by ext"
+        : "";
+      log("files: " + r.files + " rows written, " + r.skippedPaths + " paths skipped" + ignoreNote, "ok");
     } else if (which === "full") {
       log("full: vendors +" + r.vendors.addedVendors + ", files " + r.files.files + " rows", "ok");
     }
@@ -3708,11 +4796,13 @@ async function runFullProcess() {
     }
 
     // 2. Files ingest
-    log("[2/6] files ingest…", "info");
+    const useIgnores = getUseIgnores();
+    log("[2/6] files ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
     {
-      const r = await api("/api/ingest", { which: "files", source: state.listingPath });
+      const r = await api("/api/ingest", { which: "files", source: state.listingPath, useIgnores });
       if (!r.ok) { log("files ingest failed: " + r.error, "err"); return; }
-      log("  " + r.files + " file rows, " + r.docsCreated + " documents", "ok");
+      log("  " + r.files + " file rows, " + r.docsCreated + " documents" +
+          ((r.folderSkipped || r.docsSkipped) ? (" · ignore: " + (r.folderSkipped || 0) + " by folder, " + (r.docsSkipped || 0) + " no-doc by ext") : ""), "ok");
     }
     await refreshStatus();
     await loadRows();
@@ -3899,7 +4989,7 @@ function setIngestEnabled(on) {
   // ignores rows with that class. Stop extraction stays clickable — it's
   // the way out.
   const PIPELINE_ACTIONS = [
-    "run-full-process", "run-vendors", "run-files", "run-full",
+    "run-full-process", "run-vendors", "run-files",
     "classify-all", "classify-by-content", "classify-products",
   ];
   for (const action of PIPELINE_ACTIONS) {
@@ -3927,19 +5017,28 @@ async function refreshExtractStatus() {
   const el    = document.getElementById("extract-status");
   const stopB = document.getElementById("extract-stop");
 
-  // Cumulative corpus progress: how much of the total has been extracted
-  // overall (across all start/stop cycles). 0 when there are no PDFs.
-  const pct = r.totalPdfs > 0
+  // While running, prefer the in-run counters (s.done + s.cached + s.failed
+  // + s.skipped of s.total) so the bar moves even on all-cached runs that
+  // finish before the corpus-level COUNT(*) reflects the writes. Fall back
+  // to corpus-level for the idle/post-run summary.
+  const runProcessed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
+  const pctRun = s.total > 0
+    ? Math.min(100, Math.max(0, (runProcessed / s.total) * 100))
+    : 0;
+  const pctCorpus = r.totalPdfs > 0
     ? Math.min(100, Math.max(0, (r.extractedCount / r.totalPdfs) * 100))
     : 0;
+  const pct = s.running ? pctRun : pctCorpus;
 
-  let msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs + " PDFs (" + pct.toFixed(1) + "%)";
+  let msg;
   if (s.running) {
-    msg += "  ·  this run: " + s.done + " done";
-    if (s.cached)  msg += " · " + s.cached + " cached";
-    if (s.failed)  msg += " · " + s.failed + " failed";
-    if (s.skipped) msg += " · " + s.skipped + " skipped";
-    msg += " of " + s.total;
+    msg = "Extracting: " + runProcessed + " / " + s.total + " (" + pct.toFixed(1) + "%)";
+    const parts = [];
+    if (s.done)    parts.push(s.done + " done");
+    if (s.cached)  parts.push(s.cached + " cached");
+    if (s.failed)  parts.push(s.failed + " failed");
+    if (s.skipped) parts.push(s.skipped + " skipped");
+    if (parts.length) msg += "  ·  " + parts.join(" · ");
     el.classList.add("running");
     el.classList.add("with-progress");
     el.style.setProperty("--progress", pct.toFixed(1) + "%");
@@ -3952,23 +5051,39 @@ async function refreshExtractStatus() {
     }
     refreshTableCounts();
   } else {
+    msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs + " PDFs (" + pctCorpus.toFixed(1) + "%)";
     el.classList.remove("running");
     el.classList.remove("with-progress");
     el.style.removeProperty("--progress");
     stopB.style.display = "none";
     if (s.finishedAt && s.total > 0) {
       msg += "  ·  last run: " + s.done + " done";
-      if (s.failed) msg += ", " + s.failed + " failed";
+      if (s.cached)  msg += ", " + s.cached + " cached";
+      if (s.failed)  msg += ", " + s.failed + " failed";
     }
     el.textContent = msg;
     if (extractWasRunning) refreshTableCounts();
   }
-  extractWasRunning = s.running;
+  // If running state flipped, restart the poll loop with the appropriate
+  // cadence (fast while running, slow when idle).
+  if (s.running !== extractWasRunning) {
+    extractWasRunning = s.running;
+    restartExtractPolling();
+  } else {
+    extractWasRunning = s.running;
+  }
 }
 
+const EXTRACT_POLL_FAST = 250;   // ms while running — bar moves on cached runs
+const EXTRACT_POLL_IDLE = 1500;  // ms while idle — pick up new runs cheaply
 function startExtractPolling() {
   if (extractPollTimer) return;
-  extractPollTimer = setInterval(refreshExtractStatus, 1500);
+  extractPollTimer = setInterval(refreshExtractStatus, EXTRACT_POLL_IDLE);
+}
+function restartExtractPolling() {
+  if (extractPollTimer) clearInterval(extractPollTimer);
+  const ms = extractWasRunning ? EXTRACT_POLL_FAST : EXTRACT_POLL_IDLE;
+  extractPollTimer = setInterval(refreshExtractStatus, ms);
 }
 
 async function runExtractStart() {
@@ -4099,7 +5214,6 @@ const ACTIONS = {
   "purge-text-backups":  runPurgeTextBackups,
   "run-vendors":         () => runIngest("vendors"),
   "run-files":           () => runIngest("files"),
-  "run-full":            () => runIngest("full"),
   "run-full-process":    runFullProcess,
   "classify-all":        runClassify,
   "classify-by-content": runClassifyByContent,
@@ -4141,6 +5255,11 @@ document.getElementById("filter").addEventListener("input", (e) => {
 });
 document.getElementById("classified-filter").addEventListener("change", (e) => {
   state.classifiedFilter = e.target.value;
+  state.offset = 0;
+  loadRows();
+});
+document.getElementById("ignored-filter").addEventListener("change", (e) => {
+  state.ignoredFilter = e.target.value;
   state.offset = 0;
   loadRows();
 });
@@ -4283,6 +5402,46 @@ document.getElementById("ignored-row").addEventListener("click", setActiveIgnore
 document.getElementById("ignored-folders-row").addEventListener("click", setActiveIgnoredFolders);
 document.getElementById("doctypes-row").addEventListener("click", () => setActiveTable("document_types"));
 
+// Classifier editor sidebar rows + editor toolbar.
+for (const kind of ["filename", "content", "product"]) {
+  const row = document.getElementById("classifier-row-" + kind);
+  if (row) row.addEventListener("click", () => setActiveClassifierEditor(kind));
+}
+document.getElementById("cedit-add").addEventListener("click", () => {
+  if (!cedit.meta) return;
+  ceditAddRule();
+});
+document.getElementById("cedit-save").addEventListener("click", ceditSave);
+document.getElementById("cedit-discard").addEventListener("click", ceditDiscard);
+document.getElementById("cedit-expand-all").addEventListener("click", () => {
+  for (const r of cedit.rules) ceditOpenVendors.add(r.vendor || "(no vendor)");
+  renderCeditTable();
+});
+document.getElementById("cedit-collapse-all").addEventListener("click", () => {
+  ceditOpenVendors.clear();
+  renderCeditTable();
+});
+
+// Browser-level guard: warn if the user closes the tab with unsaved edits.
+window.addEventListener("beforeunload", (e) => {
+  if (cedit.kind && ceditIsDirty()) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+
+// Persist the "Apply ignore lists" checkbox state. Default ON.
+(function initUseIgnoresToggle() {
+  const el = document.getElementById("use-ignores");
+  if (!el) return;
+  const KEY = "enlogosgrag.useIgnores";
+  const saved = localStorage.getItem(KEY);
+  if (saved !== null) el.checked = saved === "1";
+  el.addEventListener("change", () => {
+    localStorage.setItem(KEY, el.checked ? "1" : "0");
+  });
+})();
+
 // Add-ignored-type form. Enter in the ext input also submits.
 (function initIgnoredForm() {
   const input = document.getElementById("ignored-input");
@@ -4376,7 +5535,7 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
   applySidebarState(localStorage.getItem(SIDEBAR_KEY) === "1");
   await refreshStatus();
   // Hide per-table controls until the user picks a table that exposes them.
-  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only")) {
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
   for (const name of Object.keys(MULTI_CONFIGS)) {
@@ -4449,7 +5608,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && (req.url === "/help" || req.url === "/help.html")) {
-      const helpPath = path.join(SERVER_DIR, "help.html");
+      const helpPath = path.join(PUBLIC_DIR, "help.html");
       if (fs.existsSync(helpPath)) {
         sendHtml(res, fs.readFileSync(helpPath, "utf8"));
       } else {
@@ -4574,6 +5733,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/ignored-folders/remove") {
       sendJson(res, 200, handleRemoveIgnoredFolder(await readBody(req)));
       return;
+    }
+    // Classifier rule editor: /api/classifier-rules/<kind> [GET=list, POST=save]
+    if (req.url && req.url.startsWith("/api/classifier-rules/")) {
+      const kind = req.url.slice("/api/classifier-rules/".length);
+      if (req.method === "GET") {
+        sendJson(res, 200, handleListClassifierRules(kind));
+        return;
+      }
+      if (req.method === "POST") {
+        sendJson(res, 200, handleSaveClassifierRules(kind, await readBody(req)));
+        return;
+      }
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("Not found");

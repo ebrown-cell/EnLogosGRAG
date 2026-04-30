@@ -16,7 +16,9 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const DEFAULT_DB_PATH = path.join(__dirname, "test.db");
+// Repo layout: app/db.js lives next to the other server modules; the SQLite
+// file lives at <repo>/db/test.db.
+export const DEFAULT_DB_PATH = path.join(__dirname, "..", "db", "test.db");
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS vendors (

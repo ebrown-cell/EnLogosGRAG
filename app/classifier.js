@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RULES_PATH = path.join(__dirname, "classifier.yaml");
+// Rule files live at <repo>/classifiers/, sibling to <repo>/app/.
+const CLASSIFIERS_DIR = path.join(__dirname, "..", "classifiers");
+const RULES_PATH = path.join(CLASSIFIERS_DIR, "classifier.yaml");
 
 const VALID_MATCH_FIELDS = new Set(["name", "parent", "path", "file_type"]);
 const VALID_CONFIDENCE = new Set(["high", "medium", "low"]);
@@ -181,7 +183,7 @@ export function classifyAll(db) {
 // Result-write policy: only fill empty slots or upgrade strictly. Never
 // overwrite a high/medium classification.
 
-const CONTENT_RULES_PATH = path.join(__dirname, "content_classifier.yaml");
+const CONTENT_RULES_PATH = path.join(CLASSIFIERS_DIR, "content_classifier.yaml");
 const CONTENT_VALID_MATCH = new Set(["first_page", "extract"]);
 const CONFIDENCE_RANK = { low: 1, medium: 2, high: 3 };
 
@@ -254,7 +256,7 @@ export function reloadContentRules() {
 // vendor matches the rule's vendor. Many-to-many results land in the
 // document_products table.
 
-const PRODUCT_RULES_PATH = path.join(__dirname, "product_classifier.yaml");
+const PRODUCT_RULES_PATH = path.join(CLASSIFIERS_DIR, "product_classifier.yaml");
 const PRODUCT_VALID_MATCH = new Set(["name", "path", "first_page", "extract"]);
 
 let productRules = null;
@@ -495,3 +497,153 @@ export function classifyAllByContent(db) {
     rulesLoaded: getContentRules().length,
   };
 }
+
+// --- Rule editor surface ------------------------------------------------
+// Read + write the three YAML rule files for the in-app editor.
+// readRules*() returns { rules: [...] } as parsed YAML. Each rule object
+// is whatever the file holds (id, document_type/vendor+product, confidence,
+// match, pattern). Order is preserved.
+//
+// writeRules*() validates by running the same loader the runtime uses, then
+// writes the new YAML. The loader throws on bad shape, which surfaces as
+// the API's error message — the disk file is left untouched on failure.
+
+const ALLOWED_FIELDS = {
+  filename: new Set(["id", "document_type", "confidence", "match", "pattern"]),
+  content:  new Set(["id", "document_type", "confidence", "match", "pattern"]),
+  product:  new Set(["id", "vendor", "product", "confidence", "match", "pattern"]),
+};
+
+function readRulesFile(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const doc = YAML.parse(raw) || {};
+  return Array.isArray(doc.rules) ? doc.rules : [];
+}
+
+// Coerce a rule object received from the UI into a plain object containing
+// only the fields the loader recognizes. Drops nulls / undefineds so they
+// don't serialize as empty `key: null` entries.
+function sanitizeRule(rule, kind) {
+  const allowed = ALLOWED_FIELDS[kind];
+  const out = {};
+  for (const k of allowed) {
+    const v = rule[k];
+    if (v === undefined || v === null || v === "") continue;
+    out[k] = String(v);
+  }
+  return out;
+}
+
+function writeRulesFile(filePath, rules, kind, loader) {
+  const sanitized = (Array.isArray(rules) ? rules : []).map((r) => sanitizeRule(r, kind));
+  const yaml = YAML.stringify({ rules: sanitized });
+
+  // Validate by writing to a temp file, attempting load, then atomic-rename.
+  const tmp = filePath + ".tmp";
+  fs.writeFileSync(tmp, yaml, "utf8");
+  try {
+    loader(tmp);
+  } catch (e) {
+    fs.unlinkSync(tmp);
+    throw e;
+  }
+  fs.renameSync(tmp, filePath);
+}
+
+// Loader probes that the writers use for validation. They mirror the
+// real loaders byte-for-byte except they read from a caller-supplied path
+// (so the temp file gets validated, not the live file).
+function validateFilenameRules(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const doc = YAML.parse(raw);
+  if (!doc || !Array.isArray(doc.rules)) {
+    throw new Error("classifier.yaml must have a top-level `rules:` list");
+  }
+  for (const r of doc.rules) {
+    const id = r.id || "(unnamed)";
+    if (!r.document_type) throw new Error(`rule ${id}: missing document_type`);
+    if (!VALID_CONFIDENCE.has(r.confidence)) throw new Error(`rule ${id}: invalid confidence ${r.confidence}`);
+    if (!VALID_MATCH_FIELDS.has(r.match))    throw new Error(`rule ${id}: invalid match ${r.match}`);
+    if (!r.pattern) throw new Error(`rule ${id}: missing pattern`);
+    try { new RegExp(r.pattern, "i"); }
+    catch (e) { throw new Error(`rule ${id}: bad regex — ${e.message}`); }
+  }
+}
+
+function validateContentRules(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const doc = YAML.parse(raw);
+  if (!doc || !Array.isArray(doc.rules)) {
+    throw new Error("content_classifier.yaml must have a top-level rules: list");
+  }
+  for (const r of doc.rules) {
+    const id = r.id || "(unnamed)";
+    if (!r.document_type) throw new Error(`rule ${id}: missing document_type`);
+    if (!VALID_CONFIDENCE.has(r.confidence)) throw new Error(`rule ${id}: invalid confidence ${r.confidence}`);
+    if (!CONTENT_VALID_MATCH.has(r.match))   throw new Error(`rule ${id}: invalid match ${r.match} (use first_page or extract)`);
+    if (!r.pattern) throw new Error(`rule ${id}: missing pattern`);
+    try { new RegExp(r.pattern, "i"); }
+    catch (e) { throw new Error(`rule ${id}: bad regex — ${e.message}`); }
+  }
+}
+
+function validateProductRules(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const doc = YAML.parse(raw);
+  if (!doc || !Array.isArray(doc.rules)) {
+    throw new Error("product_classifier.yaml must have a top-level rules: list");
+  }
+  for (const r of doc.rules) {
+    const id = r.id || "(unnamed)";
+    if (!r.vendor)  throw new Error(`rule ${id}: missing vendor`);
+    if (!r.product) throw new Error(`rule ${id}: missing product`);
+    if (!VALID_CONFIDENCE.has(r.confidence)) throw new Error(`rule ${id}: invalid confidence ${r.confidence}`);
+    if (!PRODUCT_VALID_MATCH.has(r.match))   throw new Error(`rule ${id}: invalid match ${r.match}`);
+    if (!r.pattern) throw new Error(`rule ${id}: missing pattern`);
+    try { new RegExp(r.pattern, "i"); }
+    catch (e) { throw new Error(`rule ${id}: bad regex — ${e.message}`); }
+  }
+}
+
+export function readFilenameRules() { return readRulesFile(RULES_PATH); }
+export function readContentRulesRaw() { return readRulesFile(CONTENT_RULES_PATH); }
+export function readProductRulesRaw() { return readRulesFile(PRODUCT_RULES_PATH); }
+
+export function writeFilenameRules(rules) {
+  writeRulesFile(RULES_PATH, rules, "filename", validateFilenameRules);
+  reloadRules();
+}
+export function writeContentRules(rules) {
+  writeRulesFile(CONTENT_RULES_PATH, rules, "content", validateContentRules);
+  reloadContentRules();
+}
+export function writeProductRules(rules) {
+  writeRulesFile(PRODUCT_RULES_PATH, rules, "product", validateProductRules);
+  reloadProductRules();
+}
+
+// Static metadata for the UI — labels and allowed `match` values per kind.
+// The UI fetches this once, then uses it to populate dropdowns.
+export const CLASSIFIER_KINDS = {
+  filename: {
+    label: "Filename rules",
+    file:  "classifier.yaml",
+    confidences: [...VALID_CONFIDENCE],
+    matches:     [...VALID_MATCH_FIELDS],
+    columns:     ["id", "document_type", "confidence", "match", "pattern"],
+  },
+  content: {
+    label: "Content rules",
+    file:  "content_classifier.yaml",
+    confidences: [...VALID_CONFIDENCE],
+    matches:     [...CONTENT_VALID_MATCH],
+    columns:     ["id", "document_type", "confidence", "match", "pattern"],
+  },
+  product: {
+    label: "Product rules",
+    file:  "product_classifier.yaml",
+    confidences: [...VALID_CONFIDENCE],
+    matches:     [...PRODUCT_VALID_MATCH],
+    columns:     ["id", "vendor", "product", "confidence", "match", "pattern"],
+  },
+};

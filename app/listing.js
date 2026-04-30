@@ -11,6 +11,11 @@ const FILE_EXTS = new Set([
   ".csv", ".zip", ".rar", ".7z", ".jpg", ".jpeg", ".png", ".gif", ".bmp",
   ".tif", ".tiff", ".dwg", ".dxf", ".rtf", ".msg", ".eml", ".html", ".htm",
   ".xml", ".json", ".log", ".cfg", ".ini", ".bak", ".mp4", ".mov", ".avi",
+  // Executables / installers / scripts. Recognized as files so the
+  // ignore-extension path can drop them; not allowing them here means
+  // they'd be misclassified as directories at ingest.
+  ".exe", ".dll", ".msi", ".dmg", ".pkg", ".bat", ".cmd", ".ps1",
+  ".sh", ".vbs", ".bin",
 ]);
 
 function looksLikeFile(name) {
@@ -133,7 +138,11 @@ export function ingestVendors(db, paths) {
 // references mid-flight. Clean rebuild is the simpler, correct path.
 //
 // Eager: every non-dir file gets a paired `documents` row (NULL classification).
-export function ingestFiles(db, paths) {
+export function ingestFiles(db, paths, opts = {}) {
+  // applyIgnores: when true (default), drop ignored folders entirely and
+  // skip the documents row for ignored extensions. Off → fully untouched
+  // ingest, useful when the user wants to see everything in one shot.
+  const applyIgnores = opts.applyIgnores !== false;
   const vendorIdByName = new Map(
     db.prepare("SELECT id, name FROM vendors").all().map((r) => [r.name, r.id])
   );
@@ -164,8 +173,10 @@ export function ingestFiles(db, paths) {
   // exact, case-insensitive, against any segment of the path. See
   // db.js / ignored_folders for the contract.
   const ignoredFolders = new Set(
-    db.prepare("SELECT name FROM ignored_folders").all()
-      .map((r) => r.name.toLowerCase()),
+    applyIgnores
+      ? db.prepare("SELECT name FROM ignored_folders").all()
+          .map((r) => r.name.toLowerCase())
+      : [],
   );
   const hasIgnoredSegment = (p) => {
     if (ignoredFolders.size === 0) return false;
@@ -199,7 +210,9 @@ export function ingestFiles(db, paths) {
   // Extensions to ingest as files but NOT create documents rows for.
   // See db.js / ignored_file_types for the contract.
   const ignoredExts = new Set(
-    db.prepare("SELECT ext FROM ignored_file_types").all().map((r) => r.ext),
+    applyIgnores
+      ? db.prepare("SELECT ext FROM ignored_file_types").all().map((r) => r.ext)
+      : [],
   );
 
   let docsCreated = 0;
@@ -252,5 +265,6 @@ export function ingestFiles(db, paths) {
     docsSkipped,
     folderSkipped,
     skippedPaths: skipped,
+    applyIgnores,
   };
 }

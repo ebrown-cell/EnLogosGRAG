@@ -28,7 +28,7 @@ documents  ◄──    classifier.yaml            (filename rules)
 documents  ◄──    content_classifier.yaml    (PDF-text rules, only fills empty / upgrades low)
 ```
 
-All five tables are SQLite, stored in `test.db` next to the server. Schema lives in [db.js](db.js) with idempotent migrations; the database starts empty and rebuilds on demand.
+All five tables are SQLite, stored in `db/test.db`. Schema lives in [app/db.js](app/db.js) with idempotent migrations; the database starts empty and rebuilds on demand.
 
 ## Running it
 
@@ -55,8 +55,8 @@ The first time:
 
 ## Editing the rules
 
-- [classifier.yaml](classifier.yaml) — filename / path rules. Each rule has `id`, `document_type`, `confidence` (high/medium/low), `match` (name / parent / path / file_type), and `pattern` (JS regex, case-insensitive). First match wins.
-- [content_classifier.yaml](content_classifier.yaml) — same shape but `match` is `first_page` or `extract`. Only fires against documents that have a successful extract and are unclassified or low-confidence.
+- [classifiers/classifier.yaml](classifiers/classifier.yaml) — filename / path rules. Each rule has `id`, `document_type`, `confidence` (high/medium/low), `match` (name / parent / path / file_type), and `pattern` (JS regex, case-insensitive). First match wins.
+- [classifiers/content_classifier.yaml](classifiers/content_classifier.yaml) — same shape but `match` is `first_page` or `extract`. Only fires against documents that have a successful extract and are unclassified or low-confidence.
 
 Edit either YAML and click the corresponding Classify button — rules reload from disk on every run.
 
@@ -86,15 +86,23 @@ POST /api/purge                clear vendors / files (cascades to documents) / a
 ## Project layout
 
 ```
-server.js             HTTP server + inline single-page UI
-db.js                 schema + migrations + openDb()
-listing.js            listing parser, vendor extraction, file ingest
-extractor.js          pdfjs-dist worker (singleton, resumable)
-classifier.js         filename + content classifiers
-classifier.yaml       filename rules
-content_classifier.yaml  content rules
-test.db               local SQLite DB (gitignored)
-uploads/              dropped-file landing zone (gitignored)
+app/
+  server.js             HTTP server + inline single-page UI
+  db.js                 schema + migrations + openDb()
+  listing.js            listing parser, vendor extraction, file ingest
+  extractor.js          pdfjs-dist worker (singleton, resumable)
+  classifier.js         filename + content classifiers
+classifiers/
+  classifier.yaml          filename rules
+  content_classifier.yaml  content rules
+  product_classifier.yaml  vendor → product rules
+public/
+  help.html             standalone help page served at /help
+db/
+  test.db               local SQLite DB (gitignored)
+uploads/                dropped-file landing zone (gitignored)
+scripts/
+  run.bat / run.sh      launchers
 ```
 
 ## Why no AI

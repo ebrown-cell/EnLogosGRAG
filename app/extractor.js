@@ -203,6 +203,15 @@ async function runWorker(opts) {
     } else {
       state.done++;
     }
+
+    // Yield to the event loop every 25 items so /api/extract-status can
+    // respond mid-batch. Without this, all-cached runs never expose
+    // progress — the loop body for cached items is synchronous JSON+SQLite
+    // work that completes too fast for the client poll to catch.
+    const processed = state.done + state.cached + state.failed + state.skipped;
+    if (processed % 25 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 }
 

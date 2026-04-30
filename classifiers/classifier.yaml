@@ -32,7 +32,9 @@ rules:
     document_type: listing_certificate
     confidence: high
     match: path
-    pattern: '_CSFM Listings'
+    # Match CSFM Listings folder with or without leading underscore — the
+    # underscore convention isn't universal (Edwards uses bare "CSFM Listings").
+    pattern: '_?CSFM[\s_-]+Listings'
   - id: csfm_in_name
     document_type: listing_certificate
     confidence: high

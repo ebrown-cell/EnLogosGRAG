@@ -84,7 +84,7 @@
   <p class="help-p">PDF text extraction is the slow stage. To survive DB wipes, every successful extract is also written to a sibling folder named <code>&lt;Vendors&gt;_text/</code> as a JSON file mirroring the source tree. On subsequent runs the server reads the JSON cache instead of re-running pdfjs. Use <strong>Purge → Purge text backups</strong> to clear it.</p>
 
   <h3 class="help-h">Editing the rules</h3>
-  <p class="help-p">Both YAML files live next to the server source. Each rule has <code>id</code>, <code>document_type</code>, <code>confidence</code> (high/medium/low), <code>match</code> (name/parent/path/file_type for filename rules; first_page/extract for content rules), and <code>pattern</code> (a JS regex, case-insensitive). First match wins — put specific patterns above general ones.</p>
+  <p class="help-p">Both YAML files live in <code>classifiers/</code> at the repo root. Each rule has <code>id</code>, <code>document_type</code>, <code>confidence</code> (high/medium/low), <code>match</code> (name/parent/path/file_type for filename rules; first_page/extract for content rules), and <code>pattern</code> (a JS regex, case-insensitive). First match wins — put specific patterns above general ones.</p>
 </main>
 </body>
 </html>

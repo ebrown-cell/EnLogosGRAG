@@ -1,0 +1,4180 @@
+# Vendor-scoped product detection rules.
+#
+# Each rule binds a vendor + product name + a regex. The classifier only
+# fires a rule against documents whose vendor matches `vendor` (so Potter
+# rules can't accidentally match Notifier docs). First match per
+# (document, vendor) wins.
+#
+# Match field selects what to test:
+#   name        - file basename
+#   path        - full file path (catches "...PSN-1000/foo.pdf")
+#   first_page  - first PDF page text from the extract
+#   extract     - full extracted text
+#
+# Confidence:
+#   high   - filename or path match (very specific)
+#   medium - body-text match (could be a passing reference)
+#   low    - reserved for fuzzy / catalog-derived hits
+#
+# Patterns are JS regexes, case-insensitive, no leading/trailing slashes.
+# First match wins, so put more specific rules above general ones.
+
+rules:
+
+  # =====================================================================
+  # Potter (79 rules)
+  # =====================================================================
+  - id: potter_psn_1000
+    vendor: Potter
+    product: PSN-1000
+    confidence: high
+    match: path
+    pattern: \bPSN[\s_-]?1000\b
+  - id: potter_ipa_4000v
+    vendor: Potter
+    product: IPA-4000V
+    confidence: high
+    match: path
+    pattern: \bIPA[\s_-]?4000V?\b
+  - id: potter_ra_6075
+    vendor: Potter
+    product: RA-6075
+    confidence: high
+    match: path
+    pattern: \bRA[\s_-]?6075\b
+  - id: potter_ra_6500
+    vendor: Potter
+    product: RA-6500
+    confidence: high
+    match: path
+    pattern: \bRA[\s_-]?6500\b
+  - id: potter_dca_10025
+    vendor: Potter
+    product: DCA-10025
+    confidence: high
+    match: path
+    pattern: \bDCA[\s_-]?10025\b
+  - id: potter_led_16
+    vendor: Potter
+    product: LED-16
+    confidence: high
+    match: path
+    pattern: \bLED[\s_-]?16\b
+  - id: potter_pfc_6000
+    vendor: Potter
+    product: PFC-6000
+    confidence: high
+    match: name
+    pattern: \bPFC[\s_-]?6000\b
+  - id: potter_evax_25
+    vendor: Potter
+    product: EVAX-25
+    confidence: high
+    match: name
+    pattern: \bEVAX[\s_-]?25\b
+  - id: potter_evax_50
+    vendor: Potter
+    product: EVAX-50
+    confidence: high
+    match: name
+    pattern: \bEVAX[\s_-]?50\b
+  - id: potter_evax_100
+    vendor: Potter
+    product: EVAX-100
+    confidence: high
+    match: name
+    pattern: \bEVAX[\s_-]?100\b
+  - id: potter_loc_1000
+    vendor: Potter
+    product: LOC-1000
+    confidence: high
+    match: name
+    pattern: \bLOC[\s_-]?1000\b
+  - id: potter_psn_1000e
+    vendor: Potter
+    product: PSN-1000E
+    confidence: high
+    match: name
+    pattern: \bPSN[\s_-]?1000E\b
+  - id: potter_dca_5025
+    vendor: Potter
+    product: DCA-5025
+    confidence: high
+    match: name
+    pattern: \bDCA[\s_-]?5025\b
+  - id: potter_sca_10070
+    vendor: Potter
+    product: SCA-10070
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?10070\b
+  - id: potter_sca_2525
+    vendor: Potter
+    product: SCA-2525
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?2525\b
+  - id: potter_sca_2570
+    vendor: Potter
+    product: SCA-2570
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?2570\b
+  - id: potter_sca_5025
+    vendor: Potter
+    product: SCA-5025
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?5025\b
+  - id: potter_ipa_60
+    vendor: Potter
+    product: IPA-60
+    confidence: high
+    match: name
+    pattern: \bIPA[\s_-]?60\b
+  - id: potter_ipa_100
+    vendor: Potter
+    product: IPA-100
+    confidence: high
+    match: name
+    pattern: \bIPA[\s_-]?100\b
+  - id: potter_ipa_4000
+    vendor: Potter
+    product: IPA-4000
+    confidence: high
+    match: name
+    pattern: \bIPA[\s_-]?4000\b(?!V)
+  - id: potter_bua_1000
+    vendor: Potter
+    product: BUA-1000
+    confidence: high
+    match: name
+    pattern: \bBUA[\s_-]?1000\b
+  - id: potter_sb_24
+    vendor: Potter
+    product: SB-24
+    confidence: high
+    match: name
+    pattern: \bSB[\s_-]?24\b
+  - id: potter_70v_1000
+    vendor: Potter
+    product: 70V-1000
+    confidence: high
+    match: name
+    pattern: \b70V[\s_-]?1000\b
+  - id: potter_pfc_4064
+    vendor: Potter
+    product: PFC-4064
+    confidence: high
+    match: name
+    pattern: \bPFC[\s_-]?4064\b
+  - id: potter_pfc_6075
+    vendor: Potter
+    product: PFC-6075
+    confidence: high
+    match: name
+    pattern: \bPFC[\s_-]?6075\b
+  - id: potter_psn_106
+    vendor: Potter
+    product: PSN-106
+    confidence: high
+    match: name
+    pattern: \bPSN[\s_-]?106\b
+  - id: potter_psn_64
+    vendor: Potter
+    product: PSN-64
+    confidence: high
+    match: name
+    pattern: \bPSN[\s_-]?64\b
+  - id: potter_evax_50_install
+    vendor: Potter
+    product: EVAX-50
+    confidence: high
+    match: name
+    pattern: \bEVAX[\s_-]?50\b
+  - id: potter_idc_6
+    vendor: Potter
+    product: IDC-6
+    confidence: high
+    match: name
+    pattern: \bIDC[\s_-]?6\b
+  - id: potter_mom_4
+    vendor: Potter
+    product: MOM-4
+    confidence: high
+    match: name
+    pattern: \bMOM[\s_-]?4\b
+  - id: potter_cizm_4
+    vendor: Potter
+    product: CIZM-4
+    confidence: high
+    match: name
+    pattern: \bCIZM[\s_-]?4\b
+  - id: potter_mcm
+    vendor: Potter
+    product: MCM
+    confidence: high
+    match: name
+    pattern: \bMCM[\s_-]?MINI[\s_-]?MONITOR\b
+  - id: potter_nce_1000
+    vendor: Potter
+    product: NCE-1000
+    confidence: high
+    match: name
+    pattern: \bNCE[\s_-]?1000\b
+  - id: potter_ncf_1000
+    vendor: Potter
+    product: NCF-1000
+    confidence: high
+    match: name
+    pattern: \bNCF[\s_-]?1000\b
+  - id: potter_pad100_duct
+    vendor: Potter
+    product: PAD100-DUCT
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?DUCT\b
+  - id: potter_pad100_pd
+    vendor: Potter
+    product: PAD100-PD
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?PD\b
+  - id: potter_pad100_rm
+    vendor: Potter
+    product: PAD100-RM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?RM\b
+  - id: potter_intellicom
+    vendor: Potter
+    product: IntelliCom
+    confidence: high
+    match: name
+    pattern: \bIntelliCom\b
+  - id: potter_potternet
+    vendor: Potter
+    product: PotterNet
+    confidence: high
+    match: name
+    pattern: \bPotterNet\b
+  - id: potter_sca_dca
+    vendor: Potter
+    product: SCA-DCA
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?DCA\b
+  - id: potter_aps_sa_da
+    vendor: Potter
+    product: APS-SA-DA
+    confidence: high
+    match: name
+    pattern: \bAPS[\s_-]?SA[\s_-]?DA\b
+  - id: potter_p100_p400
+    vendor: Potter
+    product: P100-P400 Frame
+    confidence: high
+    match: name
+    pattern: \bP100[\s_-]?P400\b
+  - id: potter_pad100_4db
+    vendor: Potter
+    product: PAD100-4DB/6DB
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?[46]DB\b
+  - id: potter_pad100_cd
+    vendor: Potter
+    product: PAD100-CD
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?CD\b
+  - id: potter_pad100_dim
+    vendor: Potter
+    product: PAD100-DIM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?DIM\b
+  - id: potter_pad100_drts
+    vendor: Potter
+    product: PAD100-DRTS
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?DRTS\b
+  - id: potter_pad100_hd
+    vendor: Potter
+    product: PAD100-HD
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?HD\b
+  - id: potter_pad100_im
+    vendor: Potter
+    product: PAD100-IM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?IM\b
+  - id: potter_pad100_led
+    vendor: Potter
+    product: PAD100-LED
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?LEDK?\b
+  - id: potter_pad100_lfsb
+    vendor: Potter
+    product: PAD100-LFSB
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?LFSB\b
+  - id: potter_pad100_mim
+    vendor: Potter
+    product: PAD100-MIM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?MIM\b
+  - id: potter_pad100_nac
+    vendor: Potter
+    product: PAD100-NAC
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?NAC\b
+  - id: potter_pad100_oroi
+    vendor: Potter
+    product: PAD100-OROI
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?OROI\b
+  - id: potter_pad100_pssa
+    vendor: Potter
+    product: PAD100-PSSA/PSDA
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?PS[SD]A\b
+  - id: potter_pad100_sb
+    vendor: Potter
+    product: PAD100-SB
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?SB\b
+  - id: potter_pad100_sim
+    vendor: Potter
+    product: PAD100-SIM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?SIM\b
+  - id: potter_pad100_slce
+    vendor: Potter
+    product: PAD100-SLCE
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?SLCE\b
+  - id: potter_pad100_sm
+    vendor: Potter
+    product: PAD100-SM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?SM\b
+  - id: potter_pad100_spkb
+    vendor: Potter
+    product: PAD100-SPKB
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?SPKB\b
+  - id: potter_pad100_trti
+    vendor: Potter
+    product: PAD100-TRTI
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?TRTI\b
+  - id: potter_pad100_zm
+    vendor: Potter
+    product: PAD100-ZM
+    confidence: high
+    match: name
+    pattern: \bPAD100[\s_-]?ZM\b
+  - id: potter_pad200_pcd
+    vendor: Potter
+    product: PAD200-PCD
+    confidence: high
+    match: name
+    pattern: \bPAD200[\s_-]?PCD\b
+  - id: potter_pad200_pd
+    vendor: Potter
+    product: PAD200-PD
+    confidence: high
+    match: name
+    pattern: \bPAD200[\s_-]?PD\b
+  - id: potter_pad200_duct
+    vendor: Potter
+    product: PAD200-DUCT
+    confidence: high
+    match: name
+    pattern: \bPAD200[\s_-]?DUCTR?\b
+  - id: potter_pad300
+    vendor: Potter
+    product: PAD300 series
+    confidence: high
+    match: name
+    pattern: \bPAD300[\s_-]?(?:4DB|6DB|CD|DD|DUCT|DUCTR|HD|LFSB|PCD|PD|SB)\b
+  - id: potter_pfc_6006
+    vendor: Potter
+    product: PFC-6006
+    confidence: high
+    match: name
+    pattern: \bPFC[\s_-]?6006\b
+  - id: potter_pvx_25
+    vendor: Potter
+    product: PVX-25
+    confidence: high
+    match: name
+    pattern: \bPVX[\s_-]?25\b
+  - id: potter_pvc_mp
+    vendor: Potter
+    product: PVC-MP-DP
+    confidence: high
+    match: name
+    pattern: \bPVC[\s_-]?MP[\s_-]?DP\b
+  - id: potter_ra_6075r
+    vendor: Potter
+    product: RA-6075R
+    confidence: high
+    match: name
+    pattern: \bRA[\s_-]?6075R\b
+  - id: potter_ra_6500r
+    vendor: Potter
+    product: RA-6500R
+    confidence: high
+    match: name
+    pattern: \bRA[\s_-]?6500R?F?\b
+  - id: potter_rly_5
+    vendor: Potter
+    product: RLY-5
+    confidence: high
+    match: name
+    pattern: \bRLY[\s_-]?5\b
+  - id: potter_drv_50
+    vendor: Potter
+    product: DRV-50
+    confidence: high
+    match: name
+    pattern: \bDRV[\s_-]?50\b
+  - id: potter_fft_1000
+    vendor: Potter
+    product: FFT-1000
+    confidence: high
+    match: name
+    pattern: \bFFT[\s_-]?1000\b
+  - id: potter_mc_1000
+    vendor: Potter
+    product: MC-1000
+    confidence: high
+    match: name
+    pattern: \bMC[\s_-]?1000\b
+  - id: potter_co1224
+    vendor: Potter
+    product: CO1224
+    confidence: high
+    match: name
+    pattern: \bCO1224\b
+  - id: potter_cr_135w
+    vendor: Potter
+    product: CR-135W
+    confidence: high
+    match: name
+    pattern: \bCR[\s_-]?135W\b
+  - id: potter_sca_5070
+    vendor: Potter
+    product: SCA-5070INT
+    confidence: high
+    match: name
+    pattern: \bSCA[\s_-]?5070INT\b
+  - id: potter_pac_pdc_bell
+    vendor: Potter
+    product: PAC/PDC Bell
+    confidence: high
+    match: name
+    pattern: \bP[AD]C[\s_-]?(?:AC|DC)?[\s_-]?Bell\b
+  - id: potter_osysu
+    vendor: Potter
+    product: OSYSU
+    confidence: high
+    match: name
+    pattern: \bOSYSU\b
+
+  # =====================================================================
+  # Notifier (194 rules)
+  # =====================================================================
+  - id: notifier_nfs2_3030
+    vendor: Notifier
+    product: NFS2-3030
+    confidence: high
+    match: name
+    pattern: \bNFS2[\s_-]?3030\b
+  - id: notifier_nfs2_640
+    vendor: Notifier
+    product: NFS2-640
+    confidence: high
+    match: name
+    pattern: \bNFS2[\s_-]?640\b
+  - id: notifier_nfs_320
+    vendor: Notifier
+    product: NFS-320
+    confidence: high
+    match: name
+    pattern: \bNFS[\s_-]?320\b
+  - id: notifier_n16
+    vendor: Notifier
+    product: N16
+    confidence: high
+    match: path
+    pattern: \\N16\\
+  - id: notifier_4800
+    vendor: Notifier
+    product: "4800"
+    confidence: high
+    match: path
+    pattern: \\4800\\
+  - id: notifier_afp_400
+    vendor: Notifier
+    product: AFP-400
+    confidence: high
+    match: name
+    pattern: \bAFP[\s_-]?400\b
+  - id: notifier_afp_200
+    vendor: Notifier
+    product: AFP-200
+    confidence: high
+    match: name
+    pattern: \bAFP[\s_-]?200\b
+  - id: notifier_afp_300
+    vendor: Notifier
+    product: AFP-300
+    confidence: high
+    match: name
+    pattern: \bAFP[\s_-]?300\b
+  - id: notifier_afp1010
+    vendor: Notifier
+    product: AFP1010
+    confidence: high
+    match: name
+    pattern: \bAFP[\s_-]?1010\b
+  - id: notifier_am2020
+    vendor: Notifier
+    product: AM2020
+    confidence: high
+    match: name
+    pattern: \bAM[\s_-]?2020\b
+  - id: notifier_nion
+    vendor: Notifier
+    product: NION
+    confidence: high
+    match: name
+    pattern: \bNION\b
+  - id: notifier_nfw_100x
+    vendor: Notifier
+    product: NFW-100X
+    confidence: high
+    match: name
+    pattern: \bNFW[\s_-]?100X\b
+  - id: notifier_firewarden_100_2
+    vendor: Notifier
+    product: FireWarden-100-2
+    confidence: high
+    match: name
+    pattern: \bFireWarden[\s_-]?100[\s_-]?2\b
+  - id: notifier_firewarden_50
+    vendor: Notifier
+    product: FireWarden-50
+    confidence: high
+    match: name
+    pattern: \bFireWarden[\s_-]?50C?\b
+  - id: notifier_nfw_50x
+    vendor: Notifier
+    product: NFW-50X
+    confidence: high
+    match: name
+    pattern: \bNFW[\s_-]?50X\b
+  - id: notifier_nfw_100x
+    vendor: Notifier
+    product: NFW-100X
+    confidence: high
+    match: name
+    pattern: \bNFW[\s_-]?100X\b
+  - id: notifier_nfw_50
+    vendor: Notifier
+    product: NFW-50
+    confidence: high
+    match: name
+    pattern: \bNFW[\s_-]?50\b
+  - id: notifier_nfw_100_2
+    vendor: Notifier
+    product: NFW-100-2
+    confidence: high
+    match: name
+    pattern: \bNFW[\s_-]?100[\s_-]?2\b|\bNFW2[\s_-]?100\b
+  - id: notifier_nfc_50_100
+    vendor: Notifier
+    product: NFC-50/100
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?50[\s_/-]?100(DA)?\b
+  - id: notifier_nfc_50da
+    vendor: Notifier
+    product: NFC-50DA
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?50DA\b
+  - id: notifier_nfc_ce4
+    vendor: Notifier
+    product: NFC-CE4
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?CE4\b
+  - id: notifier_nfc_ce6
+    vendor: Notifier
+    product: NFC-CE6
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?CE6\b
+  - id: notifier_nfc_loc
+    vendor: Notifier
+    product: NFC-LOC
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?LOC\b
+  - id: notifier_nfc_rm
+    vendor: Notifier
+    product: NFC-RM
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?RM\b
+  - id: notifier_nfc_rpu
+    vendor: Notifier
+    product: NFC-RPU
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?RPU\b
+  - id: notifier_nfc_bda
+    vendor: Notifier
+    product: NFC-BDA
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?BDA\b
+  - id: notifier_nfc_xrm70v
+    vendor: Notifier
+    product: NFC-XRM-70V
+    confidence: high
+    match: name
+    pattern: \bNFC[\s_-]?XRM[\s_-]?70V\b
+  - id: notifier_nfs_3030
+    vendor: Notifier
+    product: NFS-3030
+    confidence: high
+    match: name
+    pattern: \bNFS[\s_-]?3030\b
+  - id: notifier_nfs_320
+    vendor: Notifier
+    product: NFS-320
+    confidence: high
+    match: name
+    pattern: \bNFS[\s_-]?320(SYS)?\b
+  - id: notifier_nfs_640
+    vendor: Notifier
+    product: NFS-640
+    confidence: high
+    match: name
+    pattern: \bNFS[\s_-]?640\b
+  - id: notifier_onyx_firstvision
+    vendor: Notifier
+    product: ONYX FirstVision
+    confidence: high
+    match: name
+    pattern: \bONYX[\s_-]?FirstVision\b
+  - id: notifier_onyxworks
+    vendor: Notifier
+    product: ONYXWorks
+    confidence: high
+    match: name
+    pattern: \bONYXWorks\b
+  - id: notifier_uninet_2000
+    vendor: Notifier
+    product: UniNet 2000
+    confidence: high
+    match: name
+    pattern: \bUniNet[\s_-]?2000\b
+  - id: notifier_uninet_lite
+    vendor: Notifier
+    product: UniNet Lite
+    confidence: high
+    match: name
+    pattern: \bUniNet[\s_-]?Lite\b
+  - id: notifier_ncs
+    vendor: Notifier
+    product: NCS
+    confidence: high
+    match: name
+    pattern: \bNCS([\s_-]?Version)?\b
+  - id: notifier_nca_2_retro
+    vendor: Notifier
+    product: NCA-2 Retro
+    confidence: high
+    match: name
+    pattern: \bNCA[\s_-]?2[\s_-]?RETRO\b|\bNCA[\s_-]?2Retro\b
+  - id: notifier_nca_640_2
+    vendor: Notifier
+    product: NCA-640-2
+    confidence: high
+    match: name
+    pattern: \bNCA[\s_-]?640[\s_-]?2\b
+  - id: notifier_nca
+    vendor: Notifier
+    product: NCA
+    confidence: high
+    match: name
+    pattern: \bNCA[\s_-]?Installation\b
+  - id: notifier_ncm_w
+    vendor: Notifier
+    product: NCM-W/F
+    confidence: high
+    match: name
+    pattern: \bNCM[\s_-]?WF?\b
+  - id: notifier_ncm
+    vendor: Notifier
+    product: NCM
+    confidence: high
+    match: name
+    pattern: \bHigh[\s_-]?Speed[\s_-]?NCM\b|NCM[\s_-]?Install
+  - id: notifier_b210lp
+    vendor: Notifier
+    product: B210LP
+    confidence: high
+    match: name
+    pattern: \bB210LP\b
+  - id: notifier_b610lp
+    vendor: Notifier
+    product: B610LP
+    confidence: high
+    match: name
+    pattern: \bB610LP\b
+  - id: notifier_b612lp
+    vendor: Notifier
+    product: B612LP
+    confidence: high
+    match: name
+    pattern: \bB612LP\b
+  - id: notifier_b614lp
+    vendor: Notifier
+    product: B614LP
+    confidence: high
+    match: name
+    pattern: \bB614LP\b
+  - id: notifier_b616lp
+    vendor: Notifier
+    product: B616LP
+    confidence: high
+    match: name
+    pattern: \bB616LP\b
+  - id: notifier_b710lp
+    vendor: Notifier
+    product: B710LP
+    confidence: high
+    match: name
+    pattern: \bB710LPA?\b
+  - id: notifier_fsp_751
+    vendor: Notifier
+    product: FSP-751
+    confidence: high
+    match: name
+    pattern: \bFSP[\s_-]?751\b
+  - id: notifier_fsd_751
+    vendor: Notifier
+    product: FSD-751
+    confidence: high
+    match: name
+    pattern: \bFSD[\s_-]?751[A-Z]*\b
+  - id: notifier_fsl_751
+    vendor: Notifier
+    product: FSL-751
+    confidence: high
+    match: name
+    pattern: \bFSL[\s_-]?751[A-Z]*\b
+  - id: notifier_fst_751
+    vendor: Notifier
+    product: FST-751
+    confidence: high
+    match: name
+    pattern: \bFST[\s_-]?751\b
+  - id: notifier_fst_851
+    vendor: Notifier
+    product: FST-851
+    confidence: high
+    match: name
+    pattern: \bFST[\s_-]?851[A-Z]*\b
+  - id: notifier_fsc_851
+    vendor: Notifier
+    product: FSC-851
+    confidence: high
+    match: name
+    pattern: \bFSC[\s_-]?851\b
+  - id: notifier_sdx_551
+    vendor: Notifier
+    product: SDX-551
+    confidence: high
+    match: name
+    pattern: \bSDX[\s_-]?551(TH)?\b
+  - id: notifier_sdrf_751
+    vendor: Notifier
+    product: SDRF-751
+    confidence: high
+    match: name
+    pattern: \bSDRF[\s_-]?751\b
+  - id: notifier_dhx_501
+    vendor: Notifier
+    product: DHX-501
+    confidence: high
+    match: name
+    pattern: \bDHX[\s_-]?501\b
+  - id: notifier_dhx_502
+    vendor: Notifier
+    product: DHX-502
+    confidence: high
+    match: name
+    pattern: \bDHX[\s_-]?502\b
+  - id: notifier_dh100
+    vendor: Notifier
+    product: DH100
+    confidence: high
+    match: name
+    pattern: \bDH100(LP|ACDC|ACDCLP)?\b
+  - id: notifier_nh_100
+    vendor: Notifier
+    product: NH-100
+    confidence: high
+    match: name
+    pattern: \bNH[\s_-]?100[A-Z]*\b
+  - id: notifier_fcm_1
+    vendor: Notifier
+    product: FCM-1
+    confidence: high
+    match: name
+    pattern: \bFCM[\s_-]?1(?:[\s_-]?REL)?\b
+  - id: notifier_fdm_1
+    vendor: Notifier
+    product: FDM-1
+    confidence: high
+    match: name
+    pattern: \bFDM[\s_-]?1\b
+  - id: notifier_fdrm_1
+    vendor: Notifier
+    product: FDRM-1
+    confidence: high
+    match: name
+    pattern: \bFDRM[\s_-]?1\b
+  - id: notifier_fmm_1
+    vendor: Notifier
+    product: FMM-1
+    confidence: high
+    match: name
+    pattern: \bFMM[\s_-]?1\b
+  - id: notifier_fmm_101
+    vendor: Notifier
+    product: FMM-101
+    confidence: high
+    match: name
+    pattern: \bFMM[\s_-]?101\b
+  - id: notifier_fmm_4_20
+    vendor: Notifier
+    product: FMM-4-20
+    confidence: high
+    match: name
+    pattern: \bFMM[\s_-]?4[\s_-]?20\b
+  - id: notifier_frm_1
+    vendor: Notifier
+    product: FRM-1
+    confidence: high
+    match: name
+    pattern: \bFRM[\s_-]?1\b
+  - id: notifier_fzm_1
+    vendor: Notifier
+    product: FZM-1
+    confidence: high
+    match: name
+    pattern: \bFZM[\s_-]?1\b
+  - id: notifier_ftm_1
+    vendor: Notifier
+    product: FTM-1
+    confidence: high
+    match: name
+    pattern: \bFTM[\s_-]?1\b
+  - id: notifier_mmx_1
+    vendor: Notifier
+    product: MMX-1
+    confidence: high
+    match: name
+    pattern: \bMMX[\s_-]?1A?\b
+  - id: notifier_mmx_2
+    vendor: Notifier
+    product: MMX-2
+    confidence: high
+    match: name
+    pattern: \bMMX[\s_-]?2A?\b
+  - id: notifier_mmx_101
+    vendor: Notifier
+    product: MMX-101
+    confidence: high
+    match: name
+    pattern: \bMMX[\s_-]?101\b
+  - id: notifier_mmx_551
+    vendor: Notifier
+    product: MMX-551
+    confidence: high
+    match: name
+    pattern: \bMMX[\s_-]?551\b
+  - id: notifier_iso_x
+    vendor: Notifier
+    product: ISO-X
+    confidence: high
+    match: name
+    pattern: \bISO[\s_-]?X\b
+  - id: notifier_n100_iso
+    vendor: Notifier
+    product: N100-ISO
+    confidence: high
+    match: name
+    pattern: \bN100[\s_-]?ISO\b
+  - id: notifier_nmm_100
+    vendor: Notifier
+    product: NMM-100
+    confidence: high
+    match: name
+    pattern: \bNMM[\s_-]?100P?\b
+  - id: notifier_ndm_100
+    vendor: Notifier
+    product: NDM-100
+    confidence: high
+    match: name
+    pattern: \bNDM[\s_-]?100\b
+  - id: notifier_nzm_100
+    vendor: Notifier
+    product: NZM-100
+    confidence: high
+    match: name
+    pattern: \bNZM[\s_-]?100(?:[\s_-]?6)?\b
+  - id: notifier_nc_100
+    vendor: Notifier
+    product: NC-100
+    confidence: high
+    match: name
+    pattern: \bNC[\s_-]?100R?\b
+  - id: notifier_acm_8r
+    vendor: Notifier
+    product: ACM-8R
+    confidence: high
+    match: name
+    pattern: \bACM[\s_-]?8R\b
+  - id: notifier_acs
+    vendor: Notifier
+    product: ACS
+    confidence: high
+    match: name
+    pattern: \bACS[\s_-]?(?:Manual|Labels)\b
+  - id: notifier_act_1
+    vendor: Notifier
+    product: ACT-1
+    confidence: high
+    match: name
+    pattern: \bACT[\s_-]?1\b
+  - id: notifier_act_4
+    vendor: Notifier
+    product: ACT-4
+    confidence: high
+    match: name
+    pattern: \bACT[\s_-]?4\b
+  - id: notifier_aba_2
+    vendor: Notifier
+    product: ABA-2
+    confidence: high
+    match: name
+    pattern: \bABA[\s_-]?2\b
+  - id: notifier_abs_2d
+    vendor: Notifier
+    product: ABS-2D
+    confidence: high
+    match: name
+    pattern: \bABS[\s_-]?2D\b
+  - id: notifier_abs_4d
+    vendor: Notifier
+    product: ABS-4D
+    confidence: high
+    match: name
+    pattern: \bABS[\s_-]?4D\b
+  - id: notifier_abs_td
+    vendor: Notifier
+    product: ABS-TD
+    confidence: high
+    match: name
+    pattern: \bABS[\s_-]?TD\b
+  - id: notifier_afc_600
+    vendor: Notifier
+    product: AFC-600
+    confidence: high
+    match: name
+    pattern: \bAFC[\s_-]?600\b
+  - id: notifier_afm_16a
+    vendor: Notifier
+    product: AFM-16A
+    confidence: high
+    match: name
+    pattern: \bAFM[\s_-]?16AT?\b
+  - id: notifier_afl
+    vendor: Notifier
+    product: AFL Audio Fiber Link
+    confidence: high
+    match: name
+    pattern: \bAFL[\s_-]?(?:Audio|TS|RS|TM|RM)\b|\bAudio[\s_-]?Fiber[\s_-]?Link\b
+  - id: notifier_afaws
+    vendor: Notifier
+    product: AFAWS
+    confidence: high
+    match: name
+    pattern: \bAFAWS\b
+  - id: notifier_amps_24
+    vendor: Notifier
+    product: AMPS-24
+    confidence: high
+    match: name
+    pattern: \bAMPS[\s_-]?24\b
+  - id: notifier_aps_6r
+    vendor: Notifier
+    product: APS-6R
+    confidence: high
+    match: name
+    pattern: \bAPS2?[\s_-]?6R\b
+  - id: notifier_chg_75
+    vendor: Notifier
+    product: CHG-75
+    confidence: high
+    match: name
+    pattern: \bCHG[\s_-]?75\b
+  - id: notifier_chg_120
+    vendor: Notifier
+    product: CHG-120
+    confidence: high
+    match: name
+    pattern: \bCHG[\s_-]?120\b
+  - id: notifier_fcps_24
+    vendor: Notifier
+    product: FCPS-24
+    confidence: high
+    match: name
+    pattern: \bFCPS[\s_-]?24(?:S[x\d]|Sx)?\b|\bFCPS24[\s_-]?S\d\b
+  - id: notifier_pse_6_10
+    vendor: Notifier
+    product: PSE-6/10
+    confidence: high
+    match: name
+    pattern: \bPSE[\s_-]?6[\s_-]?PSE[\s_-]?10\b
+  - id: notifier_mps_24
+    vendor: Notifier
+    product: MPS-24
+    confidence: high
+    match: name
+    pattern: \bMPS[\s_-]?24\b
+  - id: notifier_cab_3
+    vendor: Notifier
+    product: CAB-3
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?3\b
+  - id: notifier_cab_4
+    vendor: Notifier
+    product: CAB-4
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?4\b
+  - id: notifier_cab_600
+    vendor: Notifier
+    product: CAB-600
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?600\b
+  - id: notifier_cab_ps1
+    vendor: Notifier
+    product: CAB-PS1
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?PS1\b
+  - id: notifier_cab_rm
+    vendor: Notifier
+    product: CAB-RM
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?RM\b
+  - id: notifier_cab_rp
+    vendor: Notifier
+    product: CAB-RP
+    confidence: high
+    match: name
+    pattern: \bCAB[\s_-]?RP\b
+  - id: notifier_bb_100
+    vendor: Notifier
+    product: BB-100/200
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?100[\s_-]?200\b
+  - id: notifier_bb_17
+    vendor: Notifier
+    product: BB-17
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?17\b
+  - id: notifier_bb_25
+    vendor: Notifier
+    product: BB-25
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?25\b
+  - id: notifier_bb_26
+    vendor: Notifier
+    product: BB-26
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?26\b
+  - id: notifier_bb_55
+    vendor: Notifier
+    product: BB-55
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?55\b
+  - id: notifier_bb_6
+    vendor: Notifier
+    product: BB-6
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?6\b
+  - id: notifier_bb_xp
+    vendor: Notifier
+    product: BB-XP
+    confidence: high
+    match: name
+    pattern: \bBB[\s_-]?XP\b
+  - id: notifier_daa2_dax
+    vendor: Notifier
+    product: DAA2/DAX
+    confidence: high
+    match: name
+    pattern: \bDAA2[\s_-]?(?:and[\s_-]?)?DAX\b
+  - id: notifier_daa
+    vendor: Notifier
+    product: DAA
+    confidence: high
+    match: name
+    pattern: \bDAA[\s_-]?5025\b|\bDAA[\s_-]?5070\b|\bSEISKIT[\s_-]?DAA\b
+  - id: notifier_dvc
+    vendor: Notifier
+    product: DVC
+    confidence: high
+    match: name
+    pattern: \bDVC(?:[\s_-]?(?:AO|KD|RPU|AUX))?\b
+  - id: notifier_411udac
+    vendor: Notifier
+    product: 411UDAC
+    confidence: high
+    match: name
+    pattern: \b411UDAC\b
+  - id: notifier_nbg_12lx
+    vendor: Notifier
+    product: NBG-12LX
+    confidence: high
+    match: name
+    pattern: \bNBG[\s_-]?12LX(?:BL|SP)?\b
+  - id: notifier_bg_10
+    vendor: Notifier
+    product: BG-10
+    confidence: high
+    match: name
+    pattern: \bBG[\s_-]?10\b
+  - id: notifier_sfp_1024
+    vendor: Notifier
+    product: SFP-1024
+    confidence: high
+    match: name
+    pattern: \bSFP[\s_-]?1024(?:E)?\b
+  - id: notifier_sfp_2402
+    vendor: Notifier
+    product: SFP-2402
+    confidence: high
+    match: name
+    pattern: \bSFP[\s_-]?2402\b
+  - id: notifier_sfp_400
+    vendor: Notifier
+    product: SFP-400
+    confidence: high
+    match: name
+    pattern: \bSFP[\s_-]?400B?\b
+  - id: notifier_sfp_5ud
+    vendor: Notifier
+    product: SFP-5UD
+    confidence: high
+    match: name
+    pattern: \bSFP[\s_-]?5UD\b
+  - id: notifier_sfp_10ud
+    vendor: Notifier
+    product: SFP-10UD
+    confidence: high
+    match: name
+    pattern: \bSFP[\s_-]?10UD\b
+  - id: notifier_sgl_2000
+    vendor: Notifier
+    product: SGL-2000
+    confidence: high
+    match: name
+    pattern: \bSGL[\s_-]?2000\b
+  - id: notifier_sgl_404
+    vendor: Notifier
+    product: SGL-404
+    confidence: high
+    match: name
+    pattern: \bSGL[\s_-]?404\b
+  - id: notifier_swift
+    vendor: Notifier
+    product: SWIFT Wireless
+    confidence: high
+    match: name
+    pattern: \bSWIFT\b
+  - id: notifier_scs
+    vendor: Notifier
+    product: SCS
+    confidence: high
+    match: name
+    pattern: \bSCS[\s_-]?(?:Manual|Install|Understanding)\b
+  - id: notifier_verifire
+    vendor: Notifier
+    product: VeriFire
+    confidence: high
+    match: name
+    pattern: \bVeriFire\b
+  - id: notifier_ip_dact
+    vendor: Notifier
+    product: IP-DACT
+    confidence: high
+    match: name
+    pattern: \bIP[\s_-]?DACT(?:[\s_-]?2)?\b
+  - id: notifier_hpff12
+    vendor: Notifier
+    product: HPFF12
+    confidence: high
+    match: name
+    pattern: \bHPFF12(?:CM)?\b
+  - id: notifier_clss_pathway
+    vendor: Notifier
+    product: CLSS Pathway
+    confidence: high
+    match: name
+    pattern: \bCLSS[\s_-]?Pathway\b
+  - id: notifier_clss_gateway
+    vendor: Notifier
+    product: CLSS Gateway
+    confidence: high
+    match: name
+    pattern: \bCLSS[\s_-]?Gateway\b
+  - id: notifier_avl_1
+    vendor: Notifier
+    product: AVL-1
+    confidence: high
+    match: name
+    pattern: \bAVL[\s_-]?1\b
+  - id: notifier_n_ann_80
+    vendor: Notifier
+    product: N-ANN-80
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?ANN[\s_-]?80\b
+  - id: notifier_n_ann_led
+    vendor: Notifier
+    product: N-ANN-LED
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?ANN[\s_-]?R?LED\b
+  - id: notifier_n_ann_rly
+    vendor: Notifier
+    product: N-ANN-RLY
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?ANN[\s_-]?RLY\b
+  - id: notifier_n_ara_10
+    vendor: Notifier
+    product: N-ARA-10
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?ARA[\s_-]?10\b
+  - id: notifier_n_fpj
+    vendor: Notifier
+    product: N-FPJ
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?FPJ\b
+  - id: notifier_n_rpj
+    vendor: Notifier
+    product: N-RPJ
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?RPJ\b
+  - id: notifier_xp_10m
+    vendor: Notifier
+    product: XP-10M
+    confidence: high
+    match: name
+    pattern: \bXP[\s_-]?10M\b
+  - id: notifier_xp_6c
+    vendor: Notifier
+    product: XP6-C
+    confidence: high
+    match: name
+    pattern: \bXP6[\s_-]?C\b
+  - id: notifier_xp_6r
+    vendor: Notifier
+    product: XP6-R
+    confidence: high
+    match: name
+    pattern: \bXP6[\s_-]?R\b
+  - id: notifier_xp5
+    vendor: Notifier
+    product: XP5
+    confidence: high
+    match: name
+    pattern: \bXP5[\s_-]?Series\b
+  - id: notifier_xp_series
+    vendor: Notifier
+    product: XP Series
+    confidence: high
+    match: name
+    pattern: ^XP[\s_-]?Series\b|\bXP[\s_-]?Operating\b
+  - id: notifier_pdrp_1001
+    vendor: Notifier
+    product: PDRP-1001
+    confidence: high
+    match: name
+    pattern: \bPDRP[\s_-]?1001(?:[A-Z])?\b
+  - id: notifier_pdrp_1002
+    vendor: Notifier
+    product: PDRP-1002
+    confidence: high
+    match: name
+    pattern: \bPDRP[\s_-]?1002(?:E)?\b
+  - id: notifier_rp_1001
+    vendor: Notifier
+    product: RP-1001
+    confidence: high
+    match: name
+    pattern: \bRP[\s_-]?1001\b|\bRP1001\b
+  - id: notifier_rks_s
+    vendor: Notifier
+    product: RKS-S
+    confidence: high
+    match: name
+    pattern: \bRKS[\s_-]?S\b
+  - id: notifier_rzs_4x
+    vendor: Notifier
+    product: RZA-4X
+    confidence: high
+    match: name
+    pattern: \bRZA[\s_-]?4X\b
+  - id: notifier_seiskit
+    vendor: Notifier
+    product: SEISKIT
+    confidence: high
+    match: name
+    pattern: \bSEISKIT\b
+  - id: notifier_ncd
+    vendor: Notifier
+    product: NCD
+    confidence: high
+    match: name
+    pattern: ^NCD[\s_-]?\d|\bNCD[\s_-]?\d{1,2}[\s_-]?20\d{2}\b
+  - id: notifier_ncb_el_fl
+    vendor: Notifier
+    product: NCB-EL/FL Router
+    confidence: high
+    match: name
+    pattern: \bNCB[\s_-]?(?:EL|FL|IM)\b
+  - id: notifier_system_5000
+    vendor: Notifier
+    product: System 5000
+    confidence: high
+    match: name
+    pattern: \bSystem[\s_-]?5000\b
+  - id: notifier_vid_net
+    vendor: Notifier
+    product: VID-NET
+    confidence: high
+    match: name
+    pattern: \bVID[\s_-]?NET\b
+  - id: notifier_vas5000
+    vendor: Notifier
+    product: VAS5000
+    confidence: high
+    match: name
+    pattern: \bVAS[\s_-]?5000\b
+  - id: notifier_6424
+    vendor: Notifier
+    product: 6424 Beam Detector
+    confidence: high
+    match: name
+    pattern: \b6424[\s_-]?Projected\b|\b6424[\s_-]?Beam\b
+  - id: notifier_md_740
+    vendor: Notifier
+    product: MD-740
+    confidence: high
+    match: name
+    pattern: \bMD[\s_-]?740\b
+  - id: notifier_marine_eq
+    vendor: Notifier
+    product: Marine EQ
+    confidence: high
+    match: name
+    pattern: \bMarine[\s_-]?EQ\b|NEMA[\s_-]?Marine\b
+  - id: notifier_cmic_1
+    vendor: Notifier
+    product: CMIC-1
+    confidence: high
+    match: name
+    pattern: \bCMIC[\s_-]?1\b
+  - id: notifier_cfft_1
+    vendor: Notifier
+    product: CFFT-1
+    confidence: high
+    match: name
+    pattern: \bCFFT[\s_-]?1\b
+  - id: notifier_chs_p40
+    vendor: Notifier
+    product: CHS-P40
+    confidence: high
+    match: name
+    pattern: \bCHS[\s_-]?P40\b
+  - id: notifier_chs_bh1
+    vendor: Notifier
+    product: CHS-BH1
+    confidence: high
+    match: name
+    pattern: \bCHS[\s_-]?BH1\b
+  - id: notifier_chs_rl_mp
+    vendor: Notifier
+    product: CHS-RL-MP
+    confidence: high
+    match: name
+    pattern: \bCHS[\s_-]?RL[\s_-]?MP\b
+  - id: notifier_ca_1
+    vendor: Notifier
+    product: CA-1
+    confidence: high
+    match: name
+    pattern: \bCA[\s_-]?1[\s_-]?Audio\b
+  - id: notifier_ca_2
+    vendor: Notifier
+    product: CA-2
+    confidence: high
+    match: name
+    pattern: \bCA[\s_-]?2[\s_-]?Audio\b
+  - id: notifier_b200s
+    vendor: Notifier
+    product: B200S
+    confidence: high
+    match: name
+    pattern: \bB200S(?:R|[\s_-]?LF)?\b
+  - id: notifier_b224rb
+    vendor: Notifier
+    product: B224RB
+    confidence: high
+    match: name
+    pattern: \bB224RB\b
+  - id: notifier_b224bi
+    vendor: Notifier
+    product: B224BI/B524BI
+    confidence: high
+    match: name
+    pattern: \bB[25]24BI\b
+  - id: notifier_b524rb
+    vendor: Notifier
+    product: B524RB
+    confidence: high
+    match: name
+    pattern: \bB524RB\b
+  - id: notifier_b501
+    vendor: Notifier
+    product: B501
+    confidence: high
+    match: name
+    pattern: \bB501(?:BH|BHT|BH[\s_-]?2|BHT[\s_-]?2)?\b
+  - id: notifier_b710hd
+    vendor: Notifier
+    product: B710HD
+    confidence: high
+    match: name
+    pattern: \bB710HD\b
+  - id: notifier_cp_651
+    vendor: Notifier
+    product: CP-651
+    confidence: high
+    match: name
+    pattern: \bCP[\s_-]?651\b
+  - id: notifier_cpx_751
+    vendor: Notifier
+    product: CPX-751
+    confidence: high
+    match: name
+    pattern: \bCPX[\s_-]?751A?\b
+  - id: notifier_d4120
+    vendor: Notifier
+    product: D4120
+    confidence: high
+    match: name
+    pattern: \bD4120\b
+  - id: notifier_dnr
+    vendor: Notifier
+    product: DNR
+    confidence: high
+    match: name
+    pattern: \bDNR\b
+  - id: notifier_fco_851
+    vendor: Notifier
+    product: FCO-851
+    confidence: high
+    match: name
+    pattern: \bFCO[\s_-]?851\b
+  - id: notifier_fco_951
+    vendor: Notifier
+    product: FCO-951
+    confidence: high
+    match: name
+    pattern: \bFCO[\s_-]?951\b
+  - id: notifier_fpc_951
+    vendor: Notifier
+    product: FPC-951
+    confidence: high
+    match: name
+    pattern: \bFPC[\s_-]?951\b
+  - id: notifier_fpti_951
+    vendor: Notifier
+    product: FPTI-951
+    confidence: high
+    match: name
+    pattern: \bFPTI[\s_-]?951\b
+  - id: notifier_fsa_5000
+    vendor: Notifier
+    product: FSA-5000
+    confidence: high
+    match: name
+    pattern: \bFSA[\s_-]?5000\b
+  - id: notifier_fsh_751
+    vendor: Notifier
+    product: FSH-751
+    confidence: high
+    match: name
+    pattern: \bFSH[\s_-]?751\b
+  - id: notifier_fsi_751
+    vendor: Notifier
+    product: FSI-751
+    confidence: high
+    match: name
+    pattern: \bFSI[\s_-]?751\b
+  - id: notifier_fsi_851
+    vendor: Notifier
+    product: FSI-851
+    confidence: high
+    match: name
+    pattern: \bFSI[\s_-]?851\b
+  - id: notifier_fsp_851
+    vendor: Notifier
+    product: FSP-851
+    confidence: high
+    match: name
+    pattern: \bFSP[\s_-]?851[A-Z]*\b
+  - id: notifier_fsp_951
+    vendor: Notifier
+    product: FSP-951
+    confidence: high
+    match: name
+    pattern: \bFSP[\s_-]?951\b
+  - id: notifier_hpx_751
+    vendor: Notifier
+    product: HPX-751
+    confidence: high
+    match: name
+    pattern: \bHPX[\s_-]?751\b
+  - id: notifier_ipx_751
+    vendor: Notifier
+    product: IPX-751
+    confidence: high
+    match: name
+    pattern: \bIPX[\s_-]?751\b
+  - id: notifier_lpx_751
+    vendor: Notifier
+    product: LPX-751
+    confidence: high
+    match: name
+    pattern: \bLPX[\s_-]?751L?\b
+  - id: notifier_sd_651
+    vendor: Notifier
+    product: SD-651
+    confidence: high
+    match: name
+    pattern: \bSD[\s_-]?651A?\b
+  - id: notifier_sdx_751
+    vendor: Notifier
+    product: SDX-751
+    confidence: high
+    match: name
+    pattern: \bSDX[\s_-]?751\b
+  - id: notifier_nd_100
+    vendor: Notifier
+    product: ND-100
+    confidence: high
+    match: name
+    pattern: \bND[\s_-]?100R?\b
+  - id: notifier_ni_100
+    vendor: Notifier
+    product: NI-100
+    confidence: high
+    match: name
+    pattern: \bNI[\s_-]?100\b
+  - id: notifier_np_100
+    vendor: Notifier
+    product: NP-100
+    confidence: high
+    match: name
+    pattern: \bNP[\s_-]?100T?\b
+  - id: notifier_rni_100
+    vendor: Notifier
+    product: RNI-100
+    confidence: high
+    match: name
+    pattern: \bRNI[\s_-]?100\b
+  - id: notifier_n_ann_io
+    vendor: Notifier
+    product: N-ANN-IO
+    confidence: high
+    match: name
+    pattern: \bN[\s_-]?ANN[\s_-]?IO\b
+  - id: notifier_mdl
+    vendor: Notifier
+    product: MDL Module
+    confidence: high
+    match: name
+    pattern: \bMDL[\s_-]?Module\b
+  - id: notifier_systemsensor
+    vendor: Notifier
+    product: System Sensor (rebrand)
+    confidence: medium
+    match: name
+    pattern: \bSystemSensor\b
+
+  # =====================================================================
+  # Edwards - EST (9 rules)
+  # =====================================================================
+  - id: edwards_est3
+    vendor: Edwards - EST
+    product: EST3
+    confidence: high
+    match: path
+    pattern: \\EST3\\
+  - id: edwards_est3x
+    vendor: Edwards - EST
+    product: EST3X
+    confidence: high
+    match: name
+    pattern: \bEST3X\b
+  - id: edwards_iox
+    vendor: Edwards - EST
+    product: iO Series
+    confidence: high
+    match: name
+    pattern: \biO[\s_-]?(64|500|1000)\b
+  - id: edwards_siga
+    vendor: Edwards - EST
+    product: Signature SIGA
+    confidence: high
+    match: name
+    pattern: \bSIGA(-[A-Z0-9]+)?\b
+  - id: edwards_5721b
+    vendor: Edwards - EST
+    product: 5721B
+    confidence: high
+    match: name
+    pattern: \b5721B\b
+  - id: edwards_intelligent_duct_housing
+    vendor: Edwards - EST
+    product: 85001-0325
+    confidence: high
+    match: name
+    pattern: \b85001[\s_-]?0325\b
+  - id: edwards_ec_duct_detector
+    vendor: Edwards - EST
+    product: 85001-0575
+    confidence: high
+    match: name
+    pattern: \b85001[\s_-]?0575\b
+  - id: edwards_superduct
+    vendor: Edwards - EST
+    product: 85001-0583
+    confidence: high
+    match: name
+    pattern: \b85001[\s_-]?0583\b
+  - id: edwards_511c
+    vendor: Edwards - EST
+    product: 511C
+    confidence: high
+    match: name
+    pattern: \b511C\b
+
+  # =====================================================================
+  # Advanced (33 rules)
+  # =====================================================================
+  - id: advanced_axis_ax
+    vendor: Advanced
+    product: Axis AX
+    confidence: high
+    match: name
+    pattern: \bAxis[\s_-]?AX\b
+  - id: advanced_ax_aps2
+    vendor: Advanced
+    product: AX-APS2
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?APS2?\b
+  - id: advanced_ax_bat
+    vendor: Advanced
+    product: AX-BAT
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?BAT\b
+  - id: advanced_ax_ctl_1v
+    vendor: Advanced
+    product: AX-CTL-1V
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?CTL[\s_-]?1V\b
+  - id: advanced_ccm_01
+    vendor: Advanced
+    product: CCM-01
+    confidence: high
+    match: name
+    pattern: \bCCM[\s_-]?01\b
+  - id: advanced_d9068p
+    vendor: Advanced
+    product: D9068P
+    confidence: high
+    match: name
+    pattern: \bD9068P\b
+  - id: advanced_ax_ctl
+    vendor: Advanced
+    product: AX-CTL
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?CTL(?:[\s_-]?\d)?\b
+  - id: advanced_ax_psu
+    vendor: Advanced
+    product: AX-PSU
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?PSU(?:[\s_-]?\d+)?\b
+  - id: advanced_ax_psn
+    vendor: Advanced
+    product: AX-PSN
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?PSN[\s_-]?\d+\b
+  - id: advanced_ax_dgp
+    vendor: Advanced
+    product: AX Series DGP
+    confidence: high
+    match: name
+    pattern: \bDGP\b
+  - id: advanced_ax_lpd
+    vendor: Advanced
+    product: AX-LPD
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?LPD\b
+  - id: advanced_ax_net
+    vendor: Advanced
+    product: AX-NET
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?NET\b
+  - id: advanced_ax_rl
+    vendor: Advanced
+    product: AX-RL
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?RL\d+\b
+  - id: advanced_ax_mdm
+    vendor: Advanced
+    product: AX-MDM
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?MDM\b
+  - id: advanced_ax_acb
+    vendor: Advanced
+    product: AX-ACB
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?ACB\b
+  - id: advanced_ax_dsp
+    vendor: Advanced
+    product: AX-DSP
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?DSP\b
+  - id: advanced_ax_lza
+    vendor: Advanced
+    product: AX-LZA-CAB
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?LZA[\s_-]?CAB\b
+  - id: advanced_ax_cty
+    vendor: Advanced
+    product: AX-CTY
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?CTY\b
+  - id: advanced_ax_moxa
+    vendor: Advanced
+    product: AX-MOXA
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?MOXA\b
+  - id: advanced_ax_012
+    vendor: Advanced
+    product: AX-012
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?012\b
+  - id: advanced_ax_048
+    vendor: Advanced
+    product: AX-048
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?048\b
+  - id: advanced_av_amp
+    vendor: Advanced
+    product: AV-AMP
+    confidence: high
+    match: name
+    pattern: \bAV[\s_-]?AMP(?:[\s_-]?\d+)?\b
+  - id: advanced_av_mic
+    vendor: Advanced
+    product: AV-MIC
+    confidence: high
+    match: name
+    pattern: \bAV[\s_-]?MIC\b
+  - id: advanced_av_v70
+    vendor: Advanced
+    product: AV-V70-KIT
+    confidence: high
+    match: name
+    pattern: \bAV[\s_-]?V70\b
+  - id: advanced_av_jack
+    vendor: Advanced
+    product: AV-JACK
+    confidence: high
+    match: name
+    pattern: \bAV[\s_-]?JACK\b
+  - id: advanced_av_zs
+    vendor: Advanced
+    product: AV-ZS
+    confidence: high
+    match: name
+    pattern: \bAV[\s_-]?ZS\b
+  - id: advanced_pc_net
+    vendor: Advanced
+    product: PC-NeT
+    confidence: high
+    match: name
+    pattern: \bPC[\s_-]?NeT\b
+  - id: advanced_ax_psn_series
+    vendor: Advanced
+    product: AX-PSN Series
+    confidence: high
+    match: name
+    pattern: \bAX[\s_-]?PSN[\s_-]?Series\b
+  - id: advanced_vesda_eco
+    vendor: Advanced
+    product: VESDA ECO
+    confidence: high
+    match: name
+    pattern: \bVESDA[\s_-]?ECO\b
+  - id: advanced_vesda_vlc
+    vendor: Advanced
+    product: VESDA VLC-400
+    confidence: high
+    match: name
+    pattern: \bVESDA[\s_-]?VLC[\s_-]?\d+\b
+  - id: advanced_xtralis_osid
+    vendor: Advanced
+    product: Xtralis OSID
+    confidence: high
+    match: name
+    pattern: \bXtralis[\s_-]?OSID\b
+  - id: advanced_xtralis_xas
+    vendor: Advanced
+    product: Xtralis XAS
+    confidence: high
+    match: name
+    pattern: \bXtralis[\s_-]?XAS\b
+  - id: advanced_fireray_3000
+    vendor: Advanced
+    product: Fireray 3000
+    confidence: high
+    match: name
+    pattern: \bFIRERAY[\s_-]?3000\b
+
+  # =====================================================================
+  # Fireray (12 rules)
+  # =====================================================================
+  - id: fireray_50_100
+    vendor: Fireray
+    product: Fireray 50/100
+    confidence: high
+    match: name
+    pattern: \bFireray[\s_-]?(50|100)\b
+  - id: fireray_one
+    vendor: Fireray
+    product: Fireray ONE
+    confidence: high
+    match: name
+    pattern: \bFireray[\s_-]?ONE\b
+  - id: fireray_3000
+    vendor: Fireray
+    product: Fireray 3000
+    confidence: high
+    match: name
+    pattern: \bFireray[\s_-]?3000\b
+  - id: fireray_5000
+    vendor: Fireray
+    product: Fireray 5000
+    confidence: high
+    match: name
+    pattern: \bFireray[\s_-]?5000\b
+  - id: fireray_2000
+    vendor: Fireray
+    product: Fireray 2000
+    confidence: high
+    match: name
+    pattern: \bF[\s_-]?2000\b|\bFireray[\s_-]?2000\b
+  - id: fireray_uv_ir2
+    vendor: Fireray
+    product: UV-IR2 Flame Detector
+    confidence: high
+    match: name
+    pattern: \bUV[\s_-]?IR2\b
+  - id: fireray_talentum_ir3
+    vendor: Fireray
+    product: Talentum IR3 Flame
+    confidence: high
+    match: name
+    pattern: \bIR3\b
+  - id: fireray_talentum_ir2
+    vendor: Fireray
+    product: Talentum IR2 Flame
+    confidence: high
+    match: name
+    pattern: \bIR2\b(?!\\?V)
+  - id: fireray_50_100_ru
+    vendor: Fireray
+    product: 50/100 RU
+    confidence: high
+    match: name
+    pattern: \b50[\s_/-]?100[\s_-]?RU\b
+  - id: fireray_2000
+    vendor: Fireray
+    product: Fireray 2000
+    confidence: high
+    match: name
+    pattern: \bFireray[\s_-]?2000\b|^2000\.pdf$
+  - id: fireray_6010
+    vendor: Fireray
+    product: 6010
+    confidence: high
+    match: name
+    pattern: \b6010\b
+  - id: fireray_talentum
+    vendor: Fireray
+    product: Talentum
+    confidence: high
+    match: name
+    pattern: \bTalentum\b
+
+  # =====================================================================
+  # Eaton Wheelock (45 rules)
+  # =====================================================================
+  - id: wheelock_e50
+    vendor: Eaton Wheelock
+    product: E50 Series
+    confidence: high
+    match: name
+    pattern: \bE50\b
+  - id: wheelock_e70
+    vendor: Eaton Wheelock
+    product: E70 Series
+    confidence: high
+    match: name
+    pattern: \bE70\b
+  - id: wheelock_lhs
+    vendor: Eaton Wheelock
+    product: LHS Series
+    confidence: medium
+    match: name
+    pattern: \bLHS[\s_-]
+  - id: wheelock_ph5
+    vendor: Eaton Wheelock
+    product: PH5 Series
+    confidence: high
+    match: name
+    pattern: \bPH5\b
+  - id: wheelock_elst
+    vendor: Eaton Wheelock
+    product: ELST Series
+    confidence: high
+    match: name
+    pattern: \bELST\b
+  - id: wheelock_sp40s
+    vendor: Eaton Wheelock
+    product: SP40S
+    confidence: high
+    match: name
+    pattern: \bSP40S\b
+  - id: eaton_as_24mcc
+    vendor: Eaton Wheelock
+    product: AS-24MCC
+    confidence: high
+    match: name
+    pattern: \bAS[\s_-]?24MCC\b
+  - id: eaton_as_24mcw
+    vendor: Eaton Wheelock
+    product: AS-24MCW
+    confidence: high
+    match: name
+    pattern: \bAS[\s_-]?24MCW\b
+  - id: eaton_as_strobe
+    vendor: Eaton Wheelock
+    product: AS Strobe
+    confidence: high
+    match: name
+    pattern: \bAS[\s_-]?Strobe\b
+  - id: eaton_ns_mcw
+    vendor: Eaton Wheelock
+    product: NS-MCW
+    confidence: high
+    match: name
+    pattern: \bNS[\s_-]?MCW\b
+  - id: eaton_ns_wall
+    vendor: Eaton Wheelock
+    product: NS Wall Strobe
+    confidence: high
+    match: name
+    pattern: \bNS[\s_-]?Wall\b
+  - id: eaton_rss_24mcc
+    vendor: Eaton Wheelock
+    product: RSS-24MCC
+    confidence: high
+    match: name
+    pattern: \bRSS[\s_-]?24MCC\b
+  - id: eaton_rss_24mcw
+    vendor: Eaton Wheelock
+    product: RSS-24MCW
+    confidence: high
+    match: name
+    pattern: \bRSS[\s_-]?24MCW\b
+  - id: eaton_rss_strobe
+    vendor: Eaton Wheelock
+    product: RSS Strobe
+    confidence: high
+    match: name
+    pattern: \bRSS[\s_-]?Strobe\b
+  - id: eaton_et70_24mcw
+    vendor: Eaton Wheelock
+    product: ET70-24MCW
+    confidence: high
+    match: name
+    pattern: \bET70[\s_-]?24MCW\b
+  - id: eaton_et70_90
+    vendor: Eaton Wheelock
+    product: ET70-90
+    confidence: high
+    match: name
+    pattern: \bET70[\s_-]?90\b
+  - id: eaton_ch70
+    vendor: Eaton Wheelock
+    product: CH70-24MCW
+    confidence: high
+    match: name
+    pattern: \bCH70[\s_-]?24MCW\b
+  - id: eaton_ch90
+    vendor: Eaton Wheelock
+    product: CH90
+    confidence: high
+    match: name
+    pattern: \bCH90\b
+  - id: eaton_amt_24
+    vendor: Eaton Wheelock
+    product: AMT-24-LSM
+    confidence: high
+    match: name
+    pattern: \bAMT[\s_-]?24[\s_-]?LSM\b
+  - id: eaton_mt_24
+    vendor: Eaton Wheelock
+    product: MT-24-LS
+    confidence: high
+    match: name
+    pattern: \bMT[\s_-]?24[\s_-]?LS\b
+  - id: eaton_miz
+    vendor: Eaton Wheelock
+    product: MIZ
+    confidence: high
+    match: name
+    pattern: \bMIZ\b
+  - id: eaton_sm_smx
+    vendor: Eaton Wheelock
+    product: SM/SMX
+    confidence: high
+    match: name
+    pattern: \bSM[\s_-]?SMX?\b
+  - id: eaton_sp4z
+    vendor: Eaton Wheelock
+    product: SP4Z
+    confidence: high
+    match: name
+    pattern: \bSP4Z\b
+  - id: eaton_sps40s
+    vendor: Eaton Wheelock
+    product: SPS40S
+    confidence: high
+    match: name
+    pattern: \bSPS40S\b
+  - id: eaton_safepath_spb
+    vendor: Eaton Wheelock
+    product: Safepath SPB
+    confidence: high
+    match: name
+    pattern: \bSafepath[\s_-]?SPB\b
+  - id: eaton_exceder
+    vendor: Eaton Wheelock
+    product: Exceder
+    confidence: high
+    match: name
+    pattern: \bexceder\b
+  - id: eaton_e90_24mcc
+    vendor: Eaton Wheelock
+    product: E90-24MCC
+    confidence: high
+    match: name
+    pattern: \bE90[\s_-]?24MCC\b
+  - id: eaton_e70_24mcc
+    vendor: Eaton Wheelock
+    product: E70-24MCC
+    confidence: high
+    match: name
+    pattern: \bE70[\s_-]?24MCC\b
+  - id: eaton_et_speaker
+    vendor: Eaton Wheelock
+    product: ET Speaker
+    confidence: high
+    match: name
+    pattern: \bET[\s_-]?Speaker\b
+  - id: eaton_aswp_24
+    vendor: Eaton Wheelock
+    product: ASWP-24
+    confidence: high
+    match: name
+    pattern: \bASWP[\s_-]?24\b
+  - id: eaton_dsm_12_24
+    vendor: Eaton Wheelock
+    product: DSM-12-24
+    confidence: high
+    match: name
+    pattern: \bDSM[\s_-]?12[\s_-]?24\b
+  - id: eaton_e50_e60
+    vendor: Eaton Wheelock
+    product: E50/E60
+    confidence: high
+    match: name
+    pattern: \bE50[\s_-]?E60\b
+  - id: eaton_e70_e90
+    vendor: Eaton Wheelock
+    product: E70/E90
+    confidence: high
+    match: name
+    pattern: \bE70[\s_-]?E90\b
+  - id: eaton_et70_et90
+    vendor: Eaton Wheelock
+    product: ET70/ET90
+    confidence: high
+    match: name
+    pattern: \bET70[\s_-]?ET90\b
+  - id: eaton_eluxa
+    vendor: Eaton Wheelock
+    product: Eluxa
+    confidence: high
+    match: name
+    pattern: \beluxa\b|ELSPSTR
+  - id: eaton_inc_ps10
+    vendor: Eaton Wheelock
+    product: INC-PS10
+    confidence: high
+    match: name
+    pattern: \bINC[\s_-]?PS10\b
+  - id: eaton_sub_nac
+    vendor: Eaton Wheelock
+    product: SUB-NAC
+    confidence: high
+    match: name
+    pattern: \bSUB[\s_-]?NAC\b
+  - id: eaton_ps_8_lp
+    vendor: Eaton Wheelock
+    product: PS-8-LP
+    confidence: high
+    match: name
+    pattern: \bPS[\s_-]?8[\s_-]?LP\b
+  - id: eaton_ps_12_24
+    vendor: Eaton Wheelock
+    product: PS-12-24
+    confidence: high
+    match: name
+    pattern: \bPS[\s_-]?12[\s_-]?24\b
+  - id: eaton_zrs_mcw
+    vendor: Eaton Wheelock
+    product: ZRS-MCW
+    confidence: high
+    match: name
+    pattern: \bZRS[\s_-]?MCW\b
+  - id: eaton_sth15
+    vendor: Eaton Wheelock
+    product: STH15
+    confidence: high
+    match: name
+    pattern: \bSTH15\b
+  - id: eaton_rsswp_2475c
+    vendor: Eaton Wheelock
+    product: RSSWP-2475C-FR
+    confidence: high
+    match: name
+    pattern: \brsswp[\s_-]?2475c\b
+  - id: eaton_osi_r_ss
+    vendor: Eaton Wheelock
+    product: OSI-R-SS
+    confidence: high
+    match: name
+    pattern: \bOSI[\s_-]?R[\s_-]?SS\b
+  - id: eaton_wbb_r
+    vendor: Eaton Wheelock
+    product: WBB-R
+    confidence: high
+    match: name
+    pattern: \bWBB[\s_-]?R\b
+  - id: eaton_rss_24mccfw
+    vendor: Eaton Wheelock
+    product: RSS-24MCCFW
+    confidence: high
+    match: name
+    pattern: \bRSS[\s_-]?24MCCFW\b
+
+  # =====================================================================
+  # Fire-Lite (40 rules)
+  # =====================================================================
+  - id: firelite_ms9050
+    vendor: Fire-Lite
+    product: MS-9050UD
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9050(UD)?\b
+  - id: firelite_ms9200
+    vendor: Fire-Lite
+    product: MS-9200UDLS
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9200(UDLS)?\b
+  - id: firelite_es50x
+    vendor: Fire-Lite
+    product: ES-50X
+    confidence: high
+    match: name
+    pattern: \bES[\s_-]?50X\b
+  - id: firelite_es200x
+    vendor: Fire-Lite
+    product: ES-200X
+    confidence: high
+    match: name
+    pattern: \bES[\s_-]?200X\b
+  - id: firelite_ms9600
+    vendor: Fire-Lite
+    product: MS-9600
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9600(LS|UDLS)?\b
+  - id: firelite_lcd_80f
+    vendor: Fire-Lite
+    product: LCD-80F
+    confidence: high
+    match: name
+    pattern: \bLCD[\s_-]?80F\b
+  - id: firelite_ms_4412b
+    vendor: Fire-Lite
+    product: MS-4412B
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?4412B?\b
+  - id: firelite_ms_4424b
+    vendor: Fire-Lite
+    product: MS-4424B
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?4424B?\b
+  - id: firelite_ms5ud
+    vendor: Fire-Lite
+    product: MS-5UD
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?5UD\b
+  - id: firelite_ms10ud
+    vendor: Fire-Lite
+    product: MS-10UD
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?10UD\b
+  - id: firelite_ann_80
+    vendor: Fire-Lite
+    product: ANN-80
+    confidence: high
+    match: name
+    pattern: \bANN[\s_-]?80\b
+  - id: firelite_ann_rly
+    vendor: Fire-Lite
+    product: ANN-RLY
+    confidence: high
+    match: name
+    pattern: \bANN[\s_-]?RLY\b
+  - id: firelite_ecc_50_100
+    vendor: Fire-Lite
+    product: ECC-50/100
+    confidence: high
+    match: name
+    pattern: \bECC[\s_-]?50[\s_/-]?100\b
+  - id: firelite_es_1000x
+    vendor: Fire-Lite
+    product: ES-1000X
+    confidence: high
+    match: name
+    pattern: \bES[\s_-]?1000X\b
+  - id: firelite_es_200x
+    vendor: Fire-Lite
+    product: ES-200X
+    confidence: high
+    match: name
+    pattern: \bES[\s_-]?200X\b
+  - id: firelite_es_50x
+    vendor: Fire-Lite
+    product: ES-50X
+    confidence: high
+    match: name
+    pattern: \bES[\s_-]?50X\b
+  - id: firelite_mp_12_24
+    vendor: Fire-Lite
+    product: MP-12/24
+    confidence: high
+    match: name
+    pattern: \bMP[\s_-]?12[\s_/-]?24\b
+  - id: firelite_411ud
+    vendor: Fire-Lite
+    product: 411UD
+    confidence: high
+    match: name
+    pattern: \b411UD\b
+  - id: firelite_b350lp
+    vendor: Fire-Lite
+    product: B350LP
+    confidence: high
+    match: name
+    pattern: \bB350LP\b
+  - id: firelite_bg_12
+    vendor: Fire-Lite
+    product: BG-12
+    confidence: high
+    match: name
+    pattern: \bBG[\s_-]?12(?:LO|LOB|LX)?\b
+  - id: firelite_bg_8
+    vendor: Fire-Lite
+    product: BG-8
+    confidence: high
+    match: name
+    pattern: \bBG[\s_-]?8\b
+  - id: firelite_cp355
+    vendor: Fire-Lite
+    product: CP355
+    confidence: high
+    match: name
+    pattern: \bCP355\b
+  - id: firelite_crf_cmf
+    vendor: Fire-Lite
+    product: CRF/CMF/MMF Modules
+    confidence: high
+    match: name
+    pattern: \bCRF[\s_-]?CMF(?:[\s_-]?MMF)?\b
+  - id: firelite_d350pl
+    vendor: Fire-Lite
+    product: D350PL
+    confidence: high
+    match: name
+    pattern: \bD350PL\b
+  - id: firelite_d355pl
+    vendor: Fire-Lite
+    product: D355PL
+    confidence: high
+    match: name
+    pattern: \bD355PL\b
+  - id: firelite_d365pl
+    vendor: Fire-Lite
+    product: D365PL
+    confidence: high
+    match: name
+    pattern: \bD365PL\b
+  - id: firelite_dnr
+    vendor: Fire-Lite
+    product: DNR
+    confidence: high
+    match: name
+    pattern: \bDNR\b
+  - id: firelite_fcps_24
+    vendor: Fire-Lite
+    product: FCPS-24
+    confidence: high
+    match: name
+    pattern: \bFCPS[\s_-]?24F[S\d]?\d?\b
+  - id: firelite_h355
+    vendor: Fire-Lite
+    product: H355
+    confidence: high
+    match: name
+    pattern: \bH355\b
+  - id: firelite_h365
+    vendor: Fire-Lite
+    product: H365
+    confidence: high
+    match: name
+    pattern: \bH365\b
+  - id: firelite_ldm
+    vendor: Fire-Lite
+    product: LDM Lamp Driver
+    confidence: high
+    match: name
+    pattern: \bLDM[\s_-]?Lamp\b
+  - id: firelite_mmf_300
+    vendor: Fire-Lite
+    product: MMF-300
+    confidence: high
+    match: name
+    pattern: \bMMF[\s_-]?300(?:[\s_-]?10)?\b
+  - id: firelite_mrp_2001
+    vendor: Fire-Lite
+    product: MRP-2001
+    confidence: high
+    match: name
+    pattern: \bMRP[\s_-]?2001\b
+  - id: firelite_ms_9050ud
+    vendor: Fire-Lite
+    product: MS-9050UD
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9050UD\b
+  - id: firelite_ms_9200
+    vendor: Fire-Lite
+    product: MS-9200
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9200(?:UDLS)?\b
+  - id: firelite_ms_9600
+    vendor: Fire-Lite
+    product: MS-9600
+    confidence: high
+    match: name
+    pattern: \bMS[\s_-]?9600\b
+  - id: firelite_s2000
+    vendor: Fire-Lite
+    product: S2000
+    confidence: high
+    match: name
+    pattern: \bS2000Panel\b
+  - id: firelite_sd_355
+    vendor: Fire-Lite
+    product: SD-355
+    confidence: high
+    match: name
+    pattern: \bSD[\s_-]?35[05]\b
+  - id: firelite_sd365
+    vendor: Fire-Lite
+    product: SD365
+    confidence: high
+    match: name
+    pattern: \bSD365\b
+  - id: firelite_sensiscan
+    vendor: Fire-Lite
+    product: Sensiscan
+    confidence: high
+    match: name
+    pattern: \bsensiscan\b
+
+  # =====================================================================
+  # CWSI (13 rules)
+  # =====================================================================
+  - id: cwsi_3000
+    vendor: CWSI
+    product: CWSI 3000
+    confidence: high
+    match: name
+    pattern: \b(?:CWSI[\s_-]?)?(?:CP[\s_-]?)?3000[A-Z]?\b
+  - id: cwsi_cp3000
+    vendor: CWSI
+    product: CP-3000
+    confidence: high
+    match: name
+    pattern: \bCP[\s_-]?3000\b
+  - id: cwsi_cp3600
+    vendor: CWSI
+    product: CP-3600
+    confidence: high
+    match: name
+    pattern: \bCP[\s_-]?3600\b
+  - id: cwsi_ar5
+    vendor: CWSI
+    product: AR-5
+    confidence: high
+    match: name
+    pattern: \bAR[\s_-]?5\b
+  - id: cwsi_300_smoke
+    vendor: CWSI
+    product: 300 Smoke
+    confidence: high
+    match: name
+    pattern: \b300[\s_-]?(?:301[\s_-]?)?Smoke\b
+  - id: cwsi_310_pull
+    vendor: CWSI
+    product: 310 Pull Station
+    confidence: high
+    match: name
+    pattern: \b310[\s_-]?Pull\b
+  - id: cwsi_320_smoke_heat
+    vendor: CWSI
+    product: 320 Smoke-Heat
+    confidence: high
+    match: name
+    pattern: \b320[\s_-]?Smoke[\s_-]?Heat\b
+  - id: cwsi_345_monitor
+    vendor: CWSI
+    product: 345 Monitor Module
+    confidence: high
+    match: name
+    pattern: \b345[\s_-]?Monitor\b
+  - id: cwsi_350_co
+    vendor: CWSI
+    product: 350 CO Detector
+    confidence: high
+    match: name
+    pattern: \b350[\s_-]?CO\b
+  - id: cwsi_520_mh_sounder
+    vendor: CWSI
+    product: 520 Sounder
+    confidence: high
+    match: name
+    pattern: \b520\b.*Sounder\b
+  - id: cwsi_sr_5
+    vendor: CWSI
+    product: SR-5
+    confidence: high
+    match: name
+    pattern: \bSR[\s_-]?5\b
+  - id: cwsi_wra_3
+    vendor: CWSI
+    product: WRA-3
+    confidence: high
+    match: name
+    pattern: \bWRA[\s_-]?3\b
+  - id: cwsi_fst_1
+    vendor: CWSI
+    product: FST-1
+    confidence: high
+    match: name
+    pattern: \bFST[\s_-]?1\b
+
+  # =====================================================================
+  # Bogen (22 rules)
+  # =====================================================================
+  - id: bogen_tpu250b
+    vendor: Bogen
+    product: TPU250B
+    confidence: high
+    match: name
+    pattern: \bTPU[\s_-]?250B?\b
+  - id: bogen_tpu100b
+    vendor: Bogen
+    product: TPU100B
+    confidence: high
+    match: name
+    pattern: \bTPU[\s_-]?100B?\b
+  - id: bogen_at10a
+    vendor: Bogen
+    product: AT10A
+    confidence: high
+    match: name
+    pattern: \bAT10A\b
+  - id: bogen_at35a
+    vendor: Bogen
+    product: AT35A
+    confidence: high
+    match: name
+    pattern: \bAT35A\b
+  - id: bogen_bdt30a
+    vendor: Bogen
+    product: BDT30A
+    confidence: high
+    match: name
+    pattern: \bBDT30A\b
+  - id: bogen_cg8a
+    vendor: Bogen
+    product: CG8A
+    confidence: high
+    match: name
+    pattern: \bCG8A\b
+  - id: bogen_drdx
+    vendor: Bogen
+    product: DRDX
+    confidence: high
+    match: name
+    pattern: \bDRDX\b
+  - id: bogen_hta125m
+    vendor: Bogen
+    product: HTA125M
+    confidence: high
+    match: name
+    pattern: \bHTA125M\b
+  - id: bogen_m300
+    vendor: Bogen
+    product: M300
+    confidence: high
+    match: name
+    pattern: \bM300\b
+  - id: bogen_m450
+    vendor: Bogen
+    product: M450
+    confidence: high
+    match: name
+    pattern: \bM450\b
+  - id: bogen_m600
+    vendor: Bogen
+    product: M600
+    confidence: high
+    match: name
+    pattern: \bM600\b
+  - id: bogen_rmpwmk3
+    vendor: Bogen
+    product: RMPWMK3
+    confidence: high
+    match: name
+    pattern: \bRMPWMK3\b
+  - id: bogen_rpk79
+    vendor: Bogen
+    product: RPK79
+    confidence: high
+    match: name
+    pattern: \bRPK79\b
+  - id: bogen_s86
+    vendor: Bogen
+    product: S86
+    confidence: high
+    match: name
+    pattern: \bS86\b
+  - id: bogen_s810
+    vendor: Bogen
+    product: S810
+    confidence: high
+    match: name
+    pattern: \bS810\b
+  - id: bogen_tb8
+    vendor: Bogen
+    product: TB8
+    confidence: high
+    match: name
+    pattern: \bTB8\b
+  - id: bogen_vrs1
+    vendor: Bogen
+    product: VRS1
+    confidence: high
+    match: name
+    pattern: \bVRS1\b
+  - id: bogen_vrs2
+    vendor: Bogen
+    product: VRS2
+    confidence: high
+    match: name
+    pattern: \bVRS2\b
+  - id: bogen_wb8
+    vendor: Bogen
+    product: WB8
+    confidence: high
+    match: name
+    pattern: \bWB8\b
+  - id: bogen_pcmtim
+    vendor: Bogen
+    product: PCMTIM
+    confidence: high
+    match: name
+    pattern: \bPCMTIM\b
+  - id: bogen_nr_100
+    vendor: Bogen
+    product: NR-100
+    confidence: high
+    match: name
+    pattern: \bNR[\s_-]?100\b
+  - id: bogen_pcm2000
+    vendor: Bogen
+    product: PCM2000
+    confidence: high
+    match: name
+    pattern: \bPCM2000\b
+
+  # =====================================================================
+  # Farenhyt (45 rules)
+  # =====================================================================
+  - id: farenhyt_005815xl
+    vendor: Farenhyt
+    product: 005815XL
+    confidence: high
+    match: path
+    pattern: \b005815XL\b
+  - id: farenhyt_5496
+    vendor: Farenhyt
+    product: "5496"
+    confidence: high
+    match: path
+    pattern: \\5496\\
+  - id: farenhyt_5499
+    vendor: Farenhyt
+    product: "5499"
+    confidence: high
+    match: path
+    pattern: \\5499\\
+  - id: farenhyt_6808
+    vendor: Farenhyt
+    product: "6808"
+    confidence: high
+    match: path
+    pattern: \\6808\\
+  - id: farenhyt_6815
+    vendor: Farenhyt
+    product: "6815"
+    confidence: high
+    match: path
+    pattern: \\6815\\
+  - id: farenhyt_6820evs
+    vendor: Farenhyt
+    product: 6820EVS
+    confidence: high
+    match: path
+    pattern: \b6820EVS\b
+  - id: farenhyt_6820
+    vendor: Farenhyt
+    product: "6820"
+    confidence: high
+    match: path
+    pattern: \\6820\\
+  - id: farenhyt_ecs_125w
+    vendor: Farenhyt
+    product: ECS-125W
+    confidence: high
+    match: path
+    pattern: \bECS[\s_-]?125W\b(?!B)
+  - id: farenhyt_ecs_125wb
+    vendor: Farenhyt
+    product: ECS-125WB
+    confidence: high
+    match: path
+    pattern: \bECS[\s_-]?125WB\b
+  - id: farenhyt_ecs_50w
+    vendor: Farenhyt
+    product: ECS-50W
+    confidence: high
+    match: path
+    pattern: \bECS[\s_-]?50W\b(?!B)
+  - id: farenhyt_ecs_50wb
+    vendor: Farenhyt
+    product: ECS-50WB
+    confidence: high
+    match: path
+    pattern: \bECS[\s_-]?50WB\b
+  - id: farenhyt_ecs_rpu
+    vendor: Farenhyt
+    product: ECS-RPU
+    confidence: high
+    match: path
+    pattern: \bECS[\s_-]?RPU\b
+  - id: farenhyt_5815xl
+    vendor: Farenhyt
+    product: 5815XL
+    confidence: high
+    match: name
+    pattern: \b5815XL\b
+  - id: farenhyt_ifp_2100
+    vendor: Farenhyt
+    product: IFP-2100
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?2100\b
+  - id: farenhyt_idp_minimon
+    vendor: Farenhyt
+    product: IDP-MINIMON
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?MINIMON\b
+  - id: farenhyt_idp_monitor_2
+    vendor: Farenhyt
+    product: IDP-MONITOR-2
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?MONITOR[\s_-]?2\b
+  - id: farenhyt_idp_monitor
+    vendor: Farenhyt
+    product: IDP-MONITOR
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?MONITOR\b
+  - id: farenhyt_idp_pull_da
+    vendor: Farenhyt
+    product: IDP-PULL-DA
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?PULL[\s_-]?DA\b
+  - id: farenhyt_idp_pull_sa
+    vendor: Farenhyt
+    product: IDP-PULL-SA
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?PULL[\s_-]?SA\b
+  - id: farenhyt_idp_relay
+    vendor: Farenhyt
+    product: IDP-RELAY
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?RELAY\b
+  - id: farenhyt_ifp_2100
+    vendor: Farenhyt
+    product: IFP-2100
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?2100\b
+  - id: farenhyt_ifp_300
+    vendor: Farenhyt
+    product: IFP-300
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?300(ECS|ECSB)?\b
+  - id: farenhyt_ifp_75b
+    vendor: Farenhyt
+    product: IFP-75B
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?75B\b
+  - id: farenhyt_hpff8
+    vendor: Farenhyt
+    product: HPFF8
+    confidence: high
+    match: name
+    pattern: \bHPFF8\b
+  - id: farenhyt_sk_nic_kit
+    vendor: Farenhyt
+    product: SK-NIC-KIT
+    confidence: high
+    match: name
+    pattern: \bSK[\s_-]?NIC[\s_-]?KIT\b
+  - id: farenhyt_sk_fml_fsl
+    vendor: Farenhyt
+    product: SK-FML-FSL
+    confidence: high
+    match: name
+    pattern: \bSK[\s_-]?FML[\s_-]?FSL\b
+  - id: farenhyt_idp_fire_co
+    vendor: Farenhyt
+    product: IDP-FIRE-CO
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?FIRE[\s_-]?CO(?:[\s_-]?(?:IV|W))?\b
+  - id: farenhyt_idp_photo
+    vendor: Farenhyt
+    product: IDP-PHOTO
+    confidence: high
+    match: name
+    pattern: \bIDP[\s_-]?PHOTO(?:[\s_-]?(?:IV|W|R[\s_-]?W))?\b
+  - id: farenhyt_ifp_2000
+    vendor: Farenhyt
+    product: IFP-2000
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?2000(?:ECS)?\b
+  - id: farenhyt_ifp_300_extended
+    vendor: Farenhyt
+    product: IFP-300
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?300B?\b
+  - id: farenhyt_ifp_75_extended
+    vendor: Farenhyt
+    product: IFP-75
+    confidence: high
+    match: name
+    pattern: \bIFP[\s_-]?75B?\b
+  - id: farenhyt_p2rl
+    vendor: Farenhyt
+    product: P2RL
+    confidence: high
+    match: name
+    pattern: \bP2RL\b
+  - id: farenhyt_pc2wl
+    vendor: Farenhyt
+    product: PC2WL
+    confidence: high
+    match: name
+    pattern: \bPC2WL\b
+  - id: farenhyt_ra_1000
+    vendor: Farenhyt
+    product: RA-1000
+    confidence: high
+    match: name
+    pattern: \bRA[\s_-]?1000R?\b
+  - id: farenhyt_ra_100
+    vendor: Farenhyt
+    product: RA-100
+    confidence: high
+    match: name
+    pattern: \bRA[\s_-]?100\b
+  - id: farenhyt_ra_2000
+    vendor: Farenhyt
+    product: RA-2000
+    confidence: high
+    match: name
+    pattern: \bRA[\s_-]?2000\b
+  - id: farenhyt_rps_1000
+    vendor: Farenhyt
+    product: RPS-1000
+    confidence: high
+    match: name
+    pattern: \bRPS[\s_-]?1000B?\b
+  - id: farenhyt_sk_photo
+    vendor: Farenhyt
+    product: SK-PHOTO
+    confidence: high
+    match: name
+    pattern: \bSK[\s_-]?PHOTO(?:[\s_-]?W)?\b
+  - id: farenhyt_sk_nic
+    vendor: Farenhyt
+    product: SK-NIC
+    confidence: high
+    match: name
+    pattern: \bSK[\s_-]?NIC\b
+  - id: farenhyt_sk5208
+    vendor: Farenhyt
+    product: SK5208
+    confidence: high
+    match: name
+    pattern: \bSK5208\b
+  - id: farenhyt_b200s_lf
+    vendor: Farenhyt
+    product: B200S-LF-WH
+    confidence: high
+    match: name
+    pattern: \bB200S[\s_-]?LF[\s_-]?WH\b
+  - id: farenhyt_dnr
+    vendor: Farenhyt
+    product: DNR
+    confidence: high
+    match: name
+    pattern: \bDNR\b
+  - id: farenhyt_ecs_dual50w
+    vendor: Farenhyt
+    product: ECS-DUAL50W
+    confidence: high
+    match: name
+    pattern: \bECS[\s_-]?DUAL50W\b
+  - id: farenhyt_hwl_lf
+    vendor: Farenhyt
+    product: HWL-LF
+    confidence: high
+    match: name
+    pattern: \bHWL[\s_-]?LF(?:[\s_-]?BP10)?\b
+  - id: farenhyt_spscwl
+    vendor: Farenhyt
+    product: SPSCWL
+    confidence: high
+    match: name
+    pattern: \bSPSCWL\b
+
+  # =====================================================================
+  # Jeron (106 rules)
+  # =====================================================================
+  - id: jeron_480
+    vendor: Jeron
+    product: Provider 480
+    confidence: high
+    match: name
+    pattern: \b(Provider[\s_-]?)?480(-1)?\b
+  - id: jeron_790
+    vendor: Jeron
+    product: Provider 790
+    confidence: high
+    match: name
+    pattern: \b(Provider[\s_-]?)?790\b
+  - id: jeron_680
+    vendor: Jeron
+    product: Provider 680
+    confidence: high
+    match: name
+    pattern: \b(Provider[\s_-]?)?680\b
+  - id: jeron_4851_vxt
+    vendor: Jeron
+    product: 4851-VXT
+    confidence: high
+    match: name
+    pattern: \b4851[\s_-]?VXT\b
+  - id: jeron_450
+    vendor: Jeron
+    product: Jeron 450
+    confidence: high
+    match: name
+    pattern: ^450\b|\bJeron[\s_-]?450\b
+  - id: jeron_460
+    vendor: Jeron
+    product: Jeron 460
+    confidence: high
+    match: name
+    pattern: ^460\b|\bJeron[\s_-]?460\b
+  - id: jeron_610
+    vendor: Jeron
+    product: Pro Alert 610
+    confidence: high
+    match: name
+    pattern: \bPro[\s_-]?Alert[\s_-]?610\b
+  - id: jeron_6800
+    vendor: Jeron
+    product: Series 6800
+    confidence: high
+    match: name
+    pattern: \bSeries[\s_-]?6800\b|\b6875\b
+  - id: jeron_4850
+    vendor: Jeron
+    product: Jeron 4850
+    confidence: high
+    match: name
+    pattern: ^4850\b
+  - id: jeron_4851
+    vendor: Jeron
+    product: Jeron 4851
+    confidence: high
+    match: name
+    pattern: ^4851\b
+  - id: jeron_4862
+    vendor: Jeron
+    product: Jeron 4862
+    confidence: high
+    match: name
+    pattern: ^4862\b
+  - id: jeron_4882
+    vendor: Jeron
+    product: Jeron 4882
+    confidence: high
+    match: name
+    pattern: ^4882\b
+  - id: jeron_4884
+    vendor: Jeron
+    product: Jeron 4884
+    confidence: high
+    match: name
+    pattern: ^4884\b
+  - id: jeron_4886
+    vendor: Jeron
+    product: Jeron 4886
+    confidence: high
+    match: name
+    pattern: ^4886\b
+  - id: jeron_4887
+    vendor: Jeron
+    product: Jeron 4887
+    confidence: high
+    match: name
+    pattern: ^4887\b
+  - id: jeron_4890
+    vendor: Jeron
+    product: Jeron 4890
+    confidence: high
+    match: name
+    pattern: ^4890\b
+  - id: jeron_4895
+    vendor: Jeron
+    product: Jeron 4895
+    confidence: high
+    match: name
+    pattern: ^4895\b
+  - id: jeron_4896
+    vendor: Jeron
+    product: Jeron 4896
+    confidence: high
+    match: name
+    pattern: ^4896\b
+  - id: jeron_6141
+    vendor: Jeron
+    product: Jeron 6141
+    confidence: high
+    match: name
+    pattern: ^6141\b
+  - id: jeron_6142
+    vendor: Jeron
+    product: Jeron 6142
+    confidence: high
+    match: name
+    pattern: ^6142\b
+  - id: jeron_6143
+    vendor: Jeron
+    product: Jeron 6143
+    confidence: high
+    match: name
+    pattern: ^6143\b
+  - id: jeron_6807
+    vendor: Jeron
+    product: Jeron 6807
+    confidence: high
+    match: name
+    pattern: ^6807\b
+  - id: jeron_6808
+    vendor: Jeron
+    product: Jeron 6808
+    confidence: high
+    match: name
+    pattern: ^6808\b
+  - id: jeron_6810
+    vendor: Jeron
+    product: Jeron 6810
+    confidence: high
+    match: name
+    pattern: ^6810\b
+  - id: jeron_6811
+    vendor: Jeron
+    product: Jeron 6811
+    confidence: high
+    match: name
+    pattern: ^6811\b
+  - id: jeron_6812
+    vendor: Jeron
+    product: Jeron 6812
+    confidence: high
+    match: name
+    pattern: ^6812\b
+  - id: jeron_6814
+    vendor: Jeron
+    product: Jeron 6814
+    confidence: high
+    match: name
+    pattern: ^6814\b
+  - id: jeron_6817
+    vendor: Jeron
+    product: Jeron 6817
+    confidence: high
+    match: name
+    pattern: ^6817\b
+  - id: jeron_6820
+    vendor: Jeron
+    product: Jeron 6820
+    confidence: high
+    match: name
+    pattern: ^6820\b
+  - id: jeron_6821
+    vendor: Jeron
+    product: Jeron 6821
+    confidence: high
+    match: name
+    pattern: ^6821\b
+  - id: jeron_6822
+    vendor: Jeron
+    product: Jeron 6822
+    confidence: high
+    match: name
+    pattern: ^6822\b
+  - id: jeron_6823
+    vendor: Jeron
+    product: Jeron 6823
+    confidence: high
+    match: name
+    pattern: ^6823\b
+  - id: jeron_6824
+    vendor: Jeron
+    product: Jeron 6824
+    confidence: high
+    match: name
+    pattern: ^6824\b
+  - id: jeron_6826
+    vendor: Jeron
+    product: Jeron 6826
+    confidence: high
+    match: name
+    pattern: ^6826\b
+  - id: jeron_6827
+    vendor: Jeron
+    product: Jeron 6827
+    confidence: high
+    match: name
+    pattern: ^6827\b
+  - id: jeron_6828
+    vendor: Jeron
+    product: Jeron 6828
+    confidence: high
+    match: name
+    pattern: ^6828\b
+  - id: jeron_6831
+    vendor: Jeron
+    product: Jeron 6831
+    confidence: high
+    match: name
+    pattern: ^6831\b
+  - id: jeron_6832
+    vendor: Jeron
+    product: Jeron 6832
+    confidence: high
+    match: name
+    pattern: ^6832\b
+  - id: jeron_6833
+    vendor: Jeron
+    product: Jeron 6833
+    confidence: high
+    match: name
+    pattern: ^6833\b
+  - id: jeron_6834
+    vendor: Jeron
+    product: Jeron 6834
+    confidence: high
+    match: name
+    pattern: ^6834\b
+  - id: jeron_6838
+    vendor: Jeron
+    product: Jeron 6838
+    confidence: high
+    match: name
+    pattern: ^6838\b
+  - id: jeron_6841
+    vendor: Jeron
+    product: Jeron 6841
+    confidence: high
+    match: name
+    pattern: ^6841\b
+  - id: jeron_6845
+    vendor: Jeron
+    product: Jeron 6845
+    confidence: high
+    match: name
+    pattern: ^6845\b
+  - id: jeron_6846
+    vendor: Jeron
+    product: Jeron 6846
+    confidence: high
+    match: name
+    pattern: ^6846\b
+  - id: jeron_6849
+    vendor: Jeron
+    product: Jeron 6849
+    confidence: high
+    match: name
+    pattern: ^6849\b
+  - id: jeron_6850
+    vendor: Jeron
+    product: Jeron 6850
+    confidence: high
+    match: name
+    pattern: ^6850\b
+  - id: jeron_6858
+    vendor: Jeron
+    product: Jeron 6858
+    confidence: high
+    match: name
+    pattern: ^6858\b
+  - id: jeron_6861
+    vendor: Jeron
+    product: Jeron 6861
+    confidence: high
+    match: name
+    pattern: ^6861\b
+  - id: jeron_6865
+    vendor: Jeron
+    product: Jeron 6865
+    confidence: high
+    match: name
+    pattern: ^6865\b
+  - id: jeron_6869
+    vendor: Jeron
+    product: Jeron 6869
+    confidence: high
+    match: name
+    pattern: ^6869\b
+  - id: jeron_6875
+    vendor: Jeron
+    product: Jeron 6875
+    confidence: high
+    match: name
+    pattern: ^6875\b
+  - id: jeron_6877
+    vendor: Jeron
+    product: Jeron 6877
+    confidence: high
+    match: name
+    pattern: ^6877\b
+  - id: jeron_6888
+    vendor: Jeron
+    product: Jeron 6888
+    confidence: high
+    match: name
+    pattern: ^6888\b
+  - id: jeron_6890
+    vendor: Jeron
+    product: Jeron 6890
+    confidence: high
+    match: name
+    pattern: ^6890\b
+  - id: jeron_6891
+    vendor: Jeron
+    product: Jeron 6891
+    confidence: high
+    match: name
+    pattern: ^6891\b
+  - id: jeron_6893
+    vendor: Jeron
+    product: Jeron 6893
+    confidence: high
+    match: name
+    pattern: ^6893\b
+  - id: jeron_7901
+    vendor: Jeron
+    product: Jeron 7901
+    confidence: high
+    match: name
+    pattern: ^7901\b
+  - id: jeron_7903
+    vendor: Jeron
+    product: Jeron 7903
+    confidence: high
+    match: name
+    pattern: ^7903\b
+  - id: jeron_7905
+    vendor: Jeron
+    product: Jeron 7905
+    confidence: high
+    match: name
+    pattern: ^7905\b
+  - id: jeron_7906
+    vendor: Jeron
+    product: Jeron 7906
+    confidence: high
+    match: name
+    pattern: ^7906\b
+  - id: jeron_7908
+    vendor: Jeron
+    product: Jeron 7908
+    confidence: high
+    match: name
+    pattern: ^7908\b
+  - id: jeron_7909
+    vendor: Jeron
+    product: Jeron 7909
+    confidence: high
+    match: name
+    pattern: ^7909\b
+  - id: jeron_7912
+    vendor: Jeron
+    product: Jeron 7912
+    confidence: high
+    match: name
+    pattern: ^7912\b
+  - id: jeron_7917
+    vendor: Jeron
+    product: Jeron 7917
+    confidence: high
+    match: name
+    pattern: ^7917\b
+  - id: jeron_7918
+    vendor: Jeron
+    product: Jeron 7918
+    confidence: high
+    match: name
+    pattern: ^7918\b
+  - id: jeron_7919
+    vendor: Jeron
+    product: Jeron 7919
+    confidence: high
+    match: name
+    pattern: ^7919\b
+  - id: jeron_7920
+    vendor: Jeron
+    product: Jeron 7920
+    confidence: high
+    match: name
+    pattern: ^7920\b
+  - id: jeron_7922
+    vendor: Jeron
+    product: Jeron 7922
+    confidence: high
+    match: name
+    pattern: ^7922\b
+  - id: jeron_7923
+    vendor: Jeron
+    product: Jeron 7923
+    confidence: high
+    match: name
+    pattern: ^7923\b
+  - id: jeron_7924
+    vendor: Jeron
+    product: Jeron 7924
+    confidence: high
+    match: name
+    pattern: ^7924\b
+  - id: jeron_7925
+    vendor: Jeron
+    product: Jeron 7925
+    confidence: high
+    match: name
+    pattern: ^7925\b
+  - id: jeron_7926
+    vendor: Jeron
+    product: Jeron 7926
+    confidence: high
+    match: name
+    pattern: ^7926\b
+  - id: jeron_7927
+    vendor: Jeron
+    product: Jeron 7927
+    confidence: high
+    match: name
+    pattern: ^7927\b
+  - id: jeron_7930
+    vendor: Jeron
+    product: Jeron 7930
+    confidence: high
+    match: name
+    pattern: ^7930\b
+  - id: jeron_7931
+    vendor: Jeron
+    product: Jeron 7931
+    confidence: high
+    match: name
+    pattern: ^7931\b
+  - id: jeron_7932
+    vendor: Jeron
+    product: Jeron 7932
+    confidence: high
+    match: name
+    pattern: ^7932\b
+  - id: jeron_7934
+    vendor: Jeron
+    product: Jeron 7934
+    confidence: high
+    match: name
+    pattern: ^7934\b
+  - id: jeron_7937
+    vendor: Jeron
+    product: Jeron 7937
+    confidence: high
+    match: name
+    pattern: ^7937\b
+  - id: jeron_7940
+    vendor: Jeron
+    product: Jeron 7940
+    confidence: high
+    match: name
+    pattern: ^7940\b
+  - id: jeron_7941
+    vendor: Jeron
+    product: Jeron 7941
+    confidence: high
+    match: name
+    pattern: ^7941\b
+  - id: jeron_7945
+    vendor: Jeron
+    product: Jeron 7945
+    confidence: high
+    match: name
+    pattern: ^7945\b
+  - id: jeron_7949
+    vendor: Jeron
+    product: Jeron 7949
+    confidence: high
+    match: name
+    pattern: ^7949\b
+  - id: jeron_7950
+    vendor: Jeron
+    product: Jeron 7950
+    confidence: high
+    match: name
+    pattern: ^7950\b
+  - id: jeron_7951
+    vendor: Jeron
+    product: Jeron 7951
+    confidence: high
+    match: name
+    pattern: ^7951\b
+  - id: jeron_7952
+    vendor: Jeron
+    product: Jeron 7952
+    confidence: high
+    match: name
+    pattern: ^7952\b
+  - id: jeron_7953
+    vendor: Jeron
+    product: Jeron 7953
+    confidence: high
+    match: name
+    pattern: ^7953\b
+  - id: jeron_7958
+    vendor: Jeron
+    product: Jeron 7958
+    confidence: high
+    match: name
+    pattern: ^7958\b
+  - id: jeron_7960
+    vendor: Jeron
+    product: Jeron 7960
+    confidence: high
+    match: name
+    pattern: ^7960\b
+  - id: jeron_7961
+    vendor: Jeron
+    product: Jeron 7961
+    confidence: high
+    match: name
+    pattern: ^7961\b
+  - id: jeron_7962
+    vendor: Jeron
+    product: Jeron 7962
+    confidence: high
+    match: name
+    pattern: ^7962\b
+  - id: jeron_7963
+    vendor: Jeron
+    product: Jeron 7963
+    confidence: high
+    match: name
+    pattern: ^7963\b
+  - id: jeron_7965
+    vendor: Jeron
+    product: Jeron 7965
+    confidence: high
+    match: name
+    pattern: ^7965\b
+  - id: jeron_7967
+    vendor: Jeron
+    product: Jeron 7967
+    confidence: high
+    match: name
+    pattern: ^7967\b
+  - id: jeron_7971
+    vendor: Jeron
+    product: Jeron 7971
+    confidence: high
+    match: name
+    pattern: ^7971\b
+  - id: jeron_7972
+    vendor: Jeron
+    product: Jeron 7972
+    confidence: high
+    match: name
+    pattern: ^7972\b
+  - id: jeron_7973
+    vendor: Jeron
+    product: Jeron 7973
+    confidence: high
+    match: name
+    pattern: ^7973\b
+  - id: jeron_7991
+    vendor: Jeron
+    product: Jeron 7991
+    confidence: high
+    match: name
+    pattern: ^7991\b
+  - id: jeron_7992
+    vendor: Jeron
+    product: Jeron 7992
+    confidence: high
+    match: name
+    pattern: ^7992\b
+  - id: jeron_7993
+    vendor: Jeron
+    product: Jeron 7993
+    confidence: high
+    match: name
+    pattern: ^7993\b
+  - id: jeron_7995
+    vendor: Jeron
+    product: Jeron 7995
+    confidence: high
+    match: name
+    pattern: ^7995\b
+  - id: jeron_8804
+    vendor: Jeron
+    product: Jeron 8804
+    confidence: high
+    match: name
+    pattern: ^8804\b
+  - id: jeron_8835
+    vendor: Jeron
+    product: Jeron 8835
+    confidence: high
+    match: name
+    pattern: ^8835\b
+  - id: jeron_9705
+    vendor: Jeron
+    product: Jeron 9705
+    confidence: high
+    match: name
+    pattern: ^9705\b
+  - id: jeron_9707
+    vendor: Jeron
+    product: Jeron 9707
+    confidence: high
+    match: name
+    pattern: ^9707\b
+  - id: jeron_9748
+    vendor: Jeron
+    product: Jeron 9748
+    confidence: high
+    match: name
+    pattern: ^9748\b
+  - id: jeron_9750
+    vendor: Jeron
+    product: Jeron 9750
+    confidence: high
+    match: name
+    pattern: ^9750\b
+
+  # =====================================================================
+  # Hochiki (11 rules)
+  # =====================================================================
+  - id: hochiki_firenet
+    vendor: Hochiki
+    product: FireNET
+    confidence: high
+    match: name
+    pattern: \bFireNET\b
+  - id: hochiki_fn_4127
+    vendor: Hochiki
+    product: FN-4127
+    confidence: high
+    match: name
+    pattern: \bFN[\s_-]?4127\b|FireNet[\s_-]?4127
+  - id: hochiki_fn_lcd_n
+    vendor: Hochiki
+    product: FN-LCD-N
+    confidence: high
+    match: name
+    pattern: \bFN[\s_-]?LCD[\s_-]?N\b
+  - id: hochiki_fn_lcd_s
+    vendor: Hochiki
+    product: FN-LCD-S
+    confidence: high
+    match: name
+    pattern: \bFN[\s_-]?LCD[\s_-]?S\b
+  - id: hochiki_fnv_dp
+    vendor: Hochiki
+    product: FNV-DP
+    confidence: high
+    match: name
+    pattern: \bFNV[\s_-]?DP\b
+  - id: hochiki_firenet_plus
+    vendor: Hochiki
+    product: FireNET Plus
+    confidence: high
+    match: name
+    pattern: \bFireNET[\s_-]?Plus\b
+  - id: hochiki_firenet
+    vendor: Hochiki
+    product: FireNET
+    confidence: high
+    match: name
+    pattern: \bFireNET?\b
+  - id: hochiki_al_136
+    vendor: Hochiki
+    product: AL-136
+    confidence: high
+    match: name
+    pattern: \bAL[\s_-]?136\b
+  - id: hochiki_fn_dac
+    vendor: Hochiki
+    product: FN-DAC
+    confidence: high
+    match: name
+    pattern: \bFN[\s_-]?DAC\b
+  - id: hochiki_fnv_voicenet
+    vendor: Hochiki
+    product: FNV-VoiceNET
+    confidence: high
+    match: name
+    pattern: \bFNV[\s_-]?VoiceNET\b
+  - id: hochiki_latitude
+    vendor: Hochiki
+    product: FireNET L@titude
+    confidence: high
+    match: name
+    pattern: \bFireNET[\s_-]?L@?titude\b|\bLatitude\b
+
+  # =====================================================================
+  # Honeywell (13 rules)
+  # =====================================================================
+  - id: honeywell_aor_5_10
+    vendor: Honeywell
+    product: AOR-5/10
+    confidence: high
+    match: name
+    pattern: \bHON[\s_-]?AOR[\s_-]?5[\s_-]?10\b
+  - id: honeywell_aor_cs
+    vendor: Honeywell
+    product: AOR-CS
+    confidence: high
+    match: name
+    pattern: \bHON[\s_-]?AOR[\s_-]?CS\b
+  - id: honeywell_aor_psu
+    vendor: Honeywell
+    product: AOR-PSU-5/10
+    confidence: high
+    match: name
+    pattern: \bHON[\s_-]?AOR[\s_-]?PSU\b
+  - id: honeywell_clss_pathway
+    vendor: Honeywell
+    product: CLSS Pathway
+    confidence: high
+    match: name
+    pattern: \bCLSS[\s_-]?Pathway\b
+  - id: honeywell_hpf_ps6e
+    vendor: Honeywell
+    product: HPF-PS6E
+    confidence: high
+    match: name
+    pattern: \bHPF[\s_-]?PS6E\b
+  - id: honeywell_hpf_ps10e
+    vendor: Honeywell
+    product: HPF-PS10E
+    confidence: high
+    match: name
+    pattern: \bHPF[\s_-]?PS10E\b
+  - id: honeywell_hpff8
+    vendor: Honeywell
+    product: HPFF8
+    confidence: high
+    match: name
+    pattern: \bHPFF8\b
+  - id: honeywell_clss_gateway
+    vendor: Honeywell
+    product: CLSS Gateway
+    confidence: high
+    match: name
+    pattern: \bCLSS[\s_-]?Gateway\b
+  - id: honeywell_e3point
+    vendor: Honeywell
+    product: E3Point
+    confidence: high
+    match: name
+    pattern: \bE3Point\b
+  - id: honeywell_etp_sign
+    vendor: Honeywell
+    product: ETP-SIGN-PFH3
+    confidence: high
+    match: name
+    pattern: \bETP[\s_-]?SIGN[\s_-]?PFH3\b
+  - id: honeywell_vista_128
+    vendor: Honeywell
+    product: VISTA-128BPBPE
+    confidence: high
+    match: name
+    pattern: \bVISTA[\s_-]?128BPBPE\b
+  - id: honeywell_hnmxea1
+    vendor: Honeywell
+    product: HNMXEA1
+    confidence: high
+    match: name
+    pattern: \bHNMXEA1\b
+  - id: honeywell_hpff12_ds
+    vendor: Honeywell
+    product: HPFF12
+    confidence: high
+    match: name
+    pattern: \bHPFF12(?:CM)?\b
+
+  # =====================================================================
+  # Altronix (8 rules)
+  # =====================================================================
+  - id: altronix_al400ulx
+    vendor: Altronix
+    product: AL400ULX
+    confidence: high
+    match: name
+    pattern: \bAL400ULX\b
+  - id: altronix_al600ul
+    vendor: Altronix
+    product: AL600UL-ADA
+    confidence: high
+    match: name
+    pattern: \bAL600UL([\s_-]?ADA)?\b
+  - id: altronix_al602ul
+    vendor: Altronix
+    product: AL602ULADA
+    confidence: high
+    match: name
+    pattern: \bAL602UL(ADA)?\b
+  - id: altronix_al800ul
+    vendor: Altronix
+    product: AL800ULADA
+    confidence: high
+    match: name
+    pattern: \bAL800UL(ADA)?\b
+  - id: altronix_al802ul
+    vendor: Altronix
+    product: AL802ULADA
+    confidence: high
+    match: name
+    pattern: \bAL802UL(ADA)?\b
+  - id: altronix_smp3
+    vendor: Altronix
+    product: SMP3
+    confidence: high
+    match: name
+    pattern: \bSMP3\b
+  - id: altronix_dsal624
+    vendor: Altronix
+    product: AL624
+    confidence: high
+    match: name
+    pattern: \bDSAL624\b
+  - id: altronix_dssmp3
+    vendor: Altronix
+    product: SMP3 (DS)
+    confidence: high
+    match: name
+    pattern: \bDSSMP3\b
+
+  # =====================================================================
+  # Digital Monitoring Products (DMP) (6 rules)
+  # =====================================================================
+  - id: dmp_1912xr
+    vendor: Digital Monitoring Products (DMP)
+    product: 1912XR
+    confidence: high
+    match: name
+    pattern: \b1912XR\b
+  - id: dmp_690_790
+    vendor: Digital Monitoring Products (DMP)
+    product: 690/790
+    confidence: high
+    match: name
+    pattern: \b690[\s_-]?790\b
+  - id: dmp_714
+    vendor: Digital Monitoring Products (DMP)
+    product: 714
+    confidence: high
+    match: name
+    pattern: \b714[\s_-]?install\b
+  - id: dmp_xr100
+    vendor: Digital Monitoring Products (DMP)
+    product: XR100FC
+    confidence: high
+    match: name
+    pattern: \bXR100(FC)?\b
+  - id: dmp_xr500
+    vendor: Digital Monitoring Products (DMP)
+    product: XR500
+    confidence: high
+    match: name
+    pattern: \bXR500\b
+  - id: dmp_865_867
+    vendor: Digital Monitoring Products (DMP)
+    product: 865/867
+    confidence: high
+    match: name
+    pattern: \b86[57][\s_-]?86[57]\b
+
+  # =====================================================================
+  # DMP (1 rule)
+  # =====================================================================
+  - id: dmp_short_xr500
+    vendor: DMP
+    product: XR-500
+    confidence: high
+    match: name
+    pattern: \bXR[\s_-]?500\b
+
+  # =====================================================================
+  # Housing Devices Inc (3 rules)
+  # =====================================================================
+  - id: hdi_ars_1200
+    vendor: Housing Devices Inc
+    product: ARS-1200
+    confidence: high
+    match: name
+    pattern: \bARS[\s_-]?1200\b
+  - id: hdi_f_server
+    vendor: Housing Devices Inc
+    product: HDI F SERVER
+    confidence: high
+    match: name
+    pattern: \bHDI[\s_-]?F[\s_-]?SERVER\b
+  - id: hdi_ip_dialer
+    vendor: Housing Devices Inc
+    product: HDI-IP Dialer
+    confidence: high
+    match: name
+    pattern: \bHDI[\s_-]?IP[\s_-]?Dialer\b
+
+  # =====================================================================
+  # Gentex (9 rules)
+  # =====================================================================
+  - id: gentex_gn_505
+    vendor: Gentex
+    product: GN-505
+    confidence: high
+    match: name
+    pattern: \bGN[\s_-]?505\b
+  - id: gentex_avsm
+    vendor: Gentex
+    product: AVSM
+    confidence: high
+    match: name
+    pattern: \bAVSM\b
+  - id: gentex_goe_r
+    vendor: Gentex
+    product: GOE-R
+    confidence: high
+    match: name
+    pattern: \bGOE[\s_-]?R\b
+  - id: gentex_goe
+    vendor: Gentex
+    product: GOE
+    confidence: high
+    match: name
+    pattern: \bGOE([\s_-]?\d)?\b
+  - id: gentex_gn_503
+    vendor: Gentex
+    product: GN-503
+    confidence: high
+    match: name
+    pattern: \bGN[\s_-]?503\b
+  - id: gentex_gx91_gx93
+    vendor: Gentex
+    product: GX91/GX93 Mini Horns
+    confidence: high
+    match: name
+    pattern: \bGX91[\s_-]?GX93\b
+  - id: gentex_sspk
+    vendor: Gentex
+    product: SSPK
+    confidence: high
+    match: name
+    pattern: \bSSPK\b
+  - id: gentex_wsspk
+    vendor: Gentex
+    product: WSSPK
+    confidence: high
+    match: name
+    pattern: \bWSSPK\b
+  - id: gentex_ge_hs
+    vendor: Gentex
+    product: GE Horn Strobe
+    confidence: high
+    match: name
+    pattern: \bGE[\s_-]?hs\b
+
+  # =====================================================================
+  # Johnson Controls (2 rules)
+  # =====================================================================
+  - id: jci_ifc_1010
+    vendor: Johnson Controls
+    product: IFC-1010
+    confidence: high
+    match: name
+    pattern: \bIFC[\s_-]?1010\b
+  - id: jci_j2351
+    vendor: Johnson Controls
+    product: J2351
+    confidence: high
+    match: name
+    pattern: \bJ2351\b
+
+  # =====================================================================
+  # Gamewell FCI (6 rules)
+  # =====================================================================
+  - id: gamewell_9020
+    vendor: Gamewell FCI
+    product: 9020
+    confidence: high
+    match: name
+    pattern: \b9020[\s_-]?0216\b
+  - id: gamewell_7100
+    vendor: Gamewell FCI
+    product: 7100
+    confidence: high
+    match: name
+    pattern: \bGamewell[\s_-]?7100\b|^7100\b
+  - id: gamewell_snac_6
+    vendor: Gamewell FCI
+    product: SNAC-6
+    confidence: high
+    match: name
+    pattern: \bSNAC[\s_-]?6\b
+  - id: gamewell_9020_0002
+    vendor: Gamewell FCI
+    product: 9020-0002
+    confidence: high
+    match: name
+    pattern: \b9020[\s_-]?0002\b
+  - id: gamewell_d4120
+    vendor: Gamewell FCI
+    product: D4120
+    confidence: high
+    match: name
+    pattern: \bD4120\b
+  - id: gamewell_snac_4
+    vendor: Gamewell FCI
+    product: SNAC-4
+    confidence: high
+    match: name
+    pattern: \bSNAC[\s_-]?4\b
+
+  # =====================================================================
+  # Cornell (1 rule)
+  # =====================================================================
+  - id: cornell_4800
+    vendor: Cornell
+    product: 4800
+    confidence: high
+    match: name
+    pattern: \b4800\b
+
+  # =====================================================================
+  # Ademco (3 rules)
+  # =====================================================================
+  - id: ademco_uvs
+    vendor: Ademco
+    product: UVS
+    confidence: high
+    match: name
+    pattern: \bAdemco[\s_-]?UVS\b
+  - id: ademco_vista_32
+    vendor: Ademco
+    product: Vista 32
+    confidence: high
+    match: name
+    pattern: \bVista[\s_-]?32\b
+  - id: ademco_vista_100
+    vendor: Ademco
+    product: Vista-100
+    confidence: high
+    match: name
+    pattern: \bVista[\s_-]?100\b
+
+  # =====================================================================
+  # Big Ass Fans (1 rule)
+  # =====================================================================
+  - id: baf_esfr
+    vendor: Big Ass Fans
+    product: BAF ESFR
+    confidence: high
+    match: name
+    pattern: \bbaf[\s_-]?esfr|RITE[\s_-]?HITE\b
+
+  # =====================================================================
+  # Air Product (2 rules)
+  # =====================================================================
+  - id: air_product_mr_100_200
+    vendor: Air Product
+    product: MR-100/200
+    confidence: high
+    match: name
+    pattern: \bMR[\s_-]?(?:100|200|Series|100[\s_-]?200)\b
+  - id: air_product_sl2000
+    vendor: Air Product
+    product: SL2000
+    confidence: high
+    match: name
+    pattern: \bSL2000\b
+
+  # =====================================================================
+  # Federal Signal (7 rules)
+  # =====================================================================
+  - id: fedsig_fsex
+    vendor: Federal Signal
+    product: FSEX
+    confidence: high
+    match: name
+    pattern: \bFSEX\b
+  - id: fedsig_s8110
+    vendor: Federal Signal
+    product: S8110
+    confidence: high
+    match: name
+    pattern: \bS8110\b
+  - id: fedsig_0811_104
+    vendor: Federal Signal
+    product: Federal Signal 0811-0104
+    confidence: high
+    match: name
+    pattern: \b0811[\s_-]?0?104\b
+  - id: fedsig_0811_002
+    vendor: Federal Signal
+    product: Federal Signal 0811-002
+    confidence: high
+    match: name
+    pattern: \b0811[\s_-]?00[23]\b
+  - id: fedsig_0811_0130
+    vendor: Federal Signal
+    product: Federal Signal 0811-0130
+    confidence: high
+    match: name
+    pattern: \b0811[\s_-]?0130\b
+  - id: fedsig_0811_112
+    vendor: Federal Signal
+    product: Federal Signal 0811-112
+    confidence: high
+    match: name
+    pattern: \b0811[\s_-]?112\b
+  - id: fedsig_0811_123
+    vendor: Federal Signal
+    product: Federal Signal 0811-123
+    confidence: high
+    match: name
+    pattern: \b0811[\s_-]?12[35]\b
+
+  # =====================================================================
+  # Atlas Sound (1 rule)
+  # =====================================================================
+  - id: atlas_sd72w
+    vendor: Atlas Sound
+    product: SD72W
+    confidence: high
+    match: name
+    pattern: \bSD7[12]2?W\b
+
+  # =====================================================================
+  # Ditek Surge Protection (3 rules)
+  # =====================================================================
+  - id: ditek_dtk_2lvlpf
+    vendor: Ditek Surge Protection
+    product: DTK-2LVLPF
+    confidence: high
+    match: name
+    pattern: \bDTK[\s_-]?2LVLPF\b
+  - id: ditek_dtk_hw
+    vendor: Ditek Surge Protection
+    product: DTK-HW
+    confidence: high
+    match: name
+    pattern: \bDTK[\s_-]?HW\b
+  - id: ditek_dtk_lvlp
+    vendor: Ditek Surge Protection
+    product: DTK-LVLP
+    confidence: high
+    match: name
+    pattern: \bDTK[\s_-]?LVLP\b
