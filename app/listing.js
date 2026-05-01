@@ -214,6 +214,13 @@ export function ingestFiles(db, paths, opts = {}) {
       ? db.prepare("SELECT ext FROM ignored_file_types").all().map((r) => r.ext)
       : [],
   );
+  // Specific paths the user has ignored (manually or via the de-duplicate
+  // action). Ingested as files but no documents row. See db.js / ignored_files.
+  const ignoredPaths = new Set(
+    applyIgnores
+      ? db.prepare("SELECT path FROM ignored_files").all().map((r) => r.path)
+      : [],
+  );
 
   let docsCreated = 0;
   let docsSkipped = 0;
@@ -248,7 +255,7 @@ export function ingestFiles(db, paths, opts = {}) {
       idByPath.set(p, fileId);
 
       if (isFile) {
-        if (ignoredExts.has(ext)) {
+        if (ignoredExts.has(ext) || ignoredPaths.has(p)) {
           docsSkipped++;
         } else {
           insertDoc.run(fileId);

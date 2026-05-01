@@ -56,12 +56,15 @@ CREATE TABLE IF NOT EXISTS documents (
     file_id           INTEGER NOT NULL UNIQUE,
     document_type_id  INTEGER,
     confidence        TEXT,
+    sha256            TEXT,
     FOREIGN KEY (file_id)          REFERENCES files(id) ON DELETE CASCADE,
     FOREIGN KEY (document_type_id) REFERENCES document_types(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_file    ON documents(file_id);
 CREATE INDEX IF NOT EXISTS idx_documents_doctype ON documents(document_type_id);
+-- idx_documents_sha256 is created by migrateAddDocumentSha256() so it
+-- can wait for the ALTER on legacy DBs that don't yet have the column.
 
 CREATE TABLE IF NOT EXISTS document_extracts (
     document_id  INTEGER PRIMARY KEY,
@@ -120,6 +123,19 @@ CREATE TABLE IF NOT EXISTS ignored_folders (
     added_at   TEXT NOT NULL,
     notes      TEXT
 );
+
+-- Specific file paths ignored at ingest time. Adding a row here also
+-- deletes the corresponding documents row immediately (cascade to extracts,
+-- products, etc.) so the corpus reflects the user's intent right away. The
+-- files row stays — re-ingest can drop it on the next walk if needed.
+-- notes is freeform; the UI uses "de-duplicated" for cluster cleanups and
+-- "manual" for individual ignores.
+CREATE TABLE IF NOT EXISTS ignored_files (
+    path       TEXT PRIMARY KEY,
+    added_at   TEXT NOT NULL,
+    notes      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ignored_files_notes ON ignored_files(notes);
 `;
 
 // Hardcoded copy of EFI's Phase 2 prompt taxonomy
@@ -355,6 +371,19 @@ function repairDocumentsFK(db) {
   }
 }
 
+// Older DBs predate the documents.sha256 column. CREATE TABLE IF NOT EXISTS
+// won't add columns to an existing table, so we add it via ALTER if missing.
+// The index is created here unconditionally (after the ALTER for legacy
+// DBs, or just on top of the existing column for fresh DBs).
+function migrateAddDocumentSha256(db) {
+  const cols = db.prepare("PRAGMA table_info(documents)").all();
+  if (cols.length === 0) return; // documents table doesn't exist yet
+  if (!cols.some((c) => c.name === "sha256")) {
+    db.exec("ALTER TABLE documents ADD COLUMN sha256 TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_documents_sha256 ON documents(sha256)");
+}
+
 function backfillFileType(db) {
   const update = db.prepare("UPDATE files SET file_type = ? WHERE id = ?");
   const rows = db
@@ -392,6 +421,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
   migrateFiles(db);
+  migrateAddDocumentSha256(db);
   seedDocumentTypesIfEmpty(db);
   return db;
 }

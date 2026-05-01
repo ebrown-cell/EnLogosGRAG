@@ -15,11 +15,13 @@ import {
   CLASSIFIER_KINDS,
 } from "./classifier.js";
 import * as extractor from "./extractor.js";
+import * as hasher from "./hasher.js";
 
-// The extractor needs to translate canonical S:\ paths to local paths
-// using the same remap table the open-file feature uses. Wire that up
-// once at module load.
+// The extractor and hasher both translate canonical S:\ paths to local
+// paths using the same remap table the open-file feature uses. Wire that
+// up once at module load.
 extractor.setPathRemapper(remapPath);
+hasher.setPathRemapper(remapPath);
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 // Repo root sits one level above app/. Used to resolve siblings like
@@ -148,6 +150,7 @@ function handleStatus() {
     const ignored = {
       types:   db.prepare("SELECT COUNT(*) AS n FROM ignored_file_types").get().n,
       folders: db.prepare("SELECT COUNT(*) AS n FROM ignored_folders").get().n,
+      files:   db.prepare("SELECT COUNT(*) AS n FROM ignored_files").get().n,
     };
     return {
       counts,
@@ -181,6 +184,77 @@ function handleResolveSource(body) {
   return { ok: true, listingPath: listing };
 }
 
+// Per-table allowlist: client column name -> SQL ORDER BY expression.
+// Keys are the column names the client surfaces (matching what each
+// browseXxx() returns); values are the SQL fragments safe to splice
+// into ORDER BY. Anything not in this map is rejected — never let a
+// raw client value into a SQL string.
+const SORT_KEYS = {
+  vendors: {
+    id:    "id",
+    name:  "name",
+    notes: "notes",
+  },
+  document_types: {
+    id:          "id",
+    name:        "name",
+    description: "description",
+  },
+  files: {
+    id:        "id",
+    name:      "name",
+    path:      "path",
+    parent_id: "parent_id",
+    vendor_id: "vendor_id",
+    file_type: "file_type",
+    is_dir:    "is_dir",
+    depth:     "depth",
+  },
+  documents: {
+    id:            "d.id",
+    document_name: "document_name",
+    vendor_name:   "v.name",
+    document_type: "dt.name",
+    confidence:    "d.confidence",
+    file_type:     "f.file_type",
+    extract:       "extract",
+    sha256:        "d.sha256",
+    file_path:     "f.path",
+  },
+  document_extracts: {
+    document_id: "e.document_id",
+    file_name:   "f.name",
+    page_count:  "e.page_count",
+    extracted_at:"e.extracted_at",
+    error:       "e.error",
+  },
+  products: {
+    id:          "p.id",
+    name:        "p.name",
+    vendor_name: "v.name",
+    notes:       "p.notes",
+  },
+  document_products: {
+    product_name:  "p.name",
+    vendor_name:   "v.name",
+    document_name: "document_name",
+    confidence:    "dp.confidence",
+    source:        "dp.source",
+  },
+};
+
+// Resolves a (table, sortColumn, sortDir) request into a safe ORDER BY
+// clause. Falls back to a sensible default per table when the input is
+// missing or invalid.
+function resolveOrderBy(table, sortColumn, sortDir, fallback) {
+  const map = SORT_KEYS[table] || {};
+  const dir = sortDir === "desc" ? "DESC" : "ASC";
+  if (sortColumn && Object.prototype.hasOwnProperty.call(map, sortColumn)) {
+    return `ORDER BY ${map[sortColumn]} ${dir}`;
+  }
+  return fallback;
+}
+
 // `table` is checked against the TABLES allowlist before being substituted
 // into the SQL string — never use req input directly in a query.
 function handleBrowse(body) {
@@ -191,6 +265,8 @@ function handleBrowse(body) {
   const limit = Math.max(1, Math.min(500, Number(body.limit) || 100));
   const offset = Math.max(0, Number(body.offset) || 0);
   const filter = (body.filter || "").trim();
+  const sortColumn = body.sortColumn || "";
+  const sortDir = body.sortDir === "desc" ? "desc" : "asc";
 
   const db = openDb();
   try {
@@ -209,16 +285,17 @@ function handleBrowse(body) {
         documentTypeFilters: Array.isArray(body.documentTypeFilters) ? body.documentTypeFilters : [],
         productFilter: body.productFilter || "",
         hasProductFilter: body.hasProductFilter || "",
+        sortColumn, sortDir,
       });
     }
     if (table === "document_extracts") {
-      return browseExtracts(db, { limit, offset, filter });
+      return browseExtracts(db, { limit, offset, filter, sortColumn, sortDir });
     }
     if (table === "products") {
-      return browseProducts(db, { limit, offset, filter });
+      return browseProducts(db, { limit, offset, filter, sortColumn, sortDir });
     }
     if (table === "document_products") {
-      return browseDocumentProducts(db, { limit, offset, filter });
+      return browseDocumentProducts(db, { limit, offset, filter, sortColumn, sortDir });
     }
 
     const clauses = [];
@@ -262,8 +339,11 @@ function handleBrowse(body) {
       .get(...args);
     const total = totalRow.n;
 
+    // Default order: PK ASC. Caller's sortColumn/sortDir overrides via
+    // the SORT_KEYS allowlist so an unknown column name can't slip into SQL.
+    const orderBy = resolveOrderBy(table, sortColumn, sortDir, "ORDER BY id ASC");
     const rows = db
-      .prepare(`SELECT * FROM ${table} ${where} LIMIT ? OFFSET ?`)
+      .prepare(`SELECT * FROM ${table} ${where} ${orderBy} LIMIT ? OFFSET ?`)
       .all(...args, limit, offset);
 
     const columns = rows[0] ? Object.keys(rows[0]) : tableColumns(db, table);
@@ -281,7 +361,7 @@ function handleBrowse(body) {
 //   "low"    keeps low/medium/high (and excludes unclassified)
 //   "medium" keeps medium/high
 //   "high"   keeps high only
-function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter }) {
+function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter, sortColumn, sortDir }) {
   const { from, where, args } = buildDocumentsWhere({
     filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter,
   });
@@ -317,9 +397,10 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
                 WHEN e.error IS NOT NULL   THEN 'err'
                 ELSE 'ok'
               END             AS extract,
+              d.sha256        AS sha256,
               f.path          AS file_path
        ${fromWithExtract} ${where}
-       ORDER BY d.id
+       ${resolveOrderBy("documents", sortColumn, sortDir, "ORDER BY d.id")}
        LIMIT ? OFFSET ?`,
     )
     .all(...args, limit, offset);
@@ -332,6 +413,7 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
     "confidence",
     "file_type",
     "extract",
+    "sha256",
     "file_path",
   ];
   return { ok: true, total, limit, offset, filter, columns, rows };
@@ -339,7 +421,7 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
 
 // Joined view of document_extracts with the file name + char count, since
 // the raw row would just show document_id (an int) and a giant text blob.
-function browseExtracts(db, { limit, offset, filter }) {
+function browseExtracts(db, { limit, offset, filter, sortColumn, sortDir }) {
   const FROM = `
     FROM document_extracts e
     JOIN documents d ON d.id = e.document_id
@@ -365,7 +447,7 @@ function browseExtracts(db, { limit, offset, filter }) {
             e.extracted_at  AS extracted_at,
             f.path          AS file_path
      ${FROM} ${where}
-     ORDER BY e.document_id
+     ${resolveOrderBy("document_extracts", sortColumn, sortDir, "ORDER BY e.document_id")}
      LIMIT ? OFFSET ?`,
   ).all(...args, limit, offset);
 
@@ -379,7 +461,7 @@ function browseExtracts(db, { limit, offset, filter }) {
 // Joined view of products with vendor_name resolved + a doc count from
 // document_products. Replaces the raw products view because vendor_id
 // alone is opaque.
-function browseProducts(db, { limit, offset, filter }) {
+function browseProducts(db, { limit, offset, filter, sortColumn, sortDir }) {
   const FROM = `
     FROM products p
     JOIN vendors v ON v.id = p.vendor_id
@@ -401,7 +483,7 @@ function browseProducts(db, { limit, offset, filter }) {
             p.notes   AS notes,
             (SELECT COUNT(*) FROM document_products dp WHERE dp.product_id = p.id) AS docs
      ${FROM} ${where}
-     ORDER BY v.name, p.name
+     ${resolveOrderBy("products", sortColumn, sortDir, "ORDER BY v.name, p.name")}
      LIMIT ? OFFSET ?`,
   ).all(...args, limit, offset);
 
@@ -412,7 +494,7 @@ function browseProducts(db, { limit, offset, filter }) {
 // Joined view of document_products. Replaces the raw two-int row with
 // readable names (same document_name treatment as the documents view —
 // extension stripped).
-function browseDocumentProducts(db, { limit, offset, filter }) {
+function browseDocumentProducts(db, { limit, offset, filter, sortColumn, sortDir }) {
   const FROM = `
     FROM document_products dp
     JOIN documents d ON d.id = dp.document_id
@@ -444,7 +526,7 @@ function browseDocumentProducts(db, { limit, offset, filter }) {
             dp.source       AS source,
             f.path          AS file_path
      ${FROM} ${where}
-     ORDER BY p.name, v.name, dp.document_id
+     ${resolveOrderBy("document_products", sortColumn, sortDir, "ORDER BY p.name, v.name, dp.document_id")}
      LIMIT ? OFFSET ?`,
   ).all(...args, limit, offset);
 
@@ -761,6 +843,74 @@ function handleSaveClassifierRules(kind, body) {
   }
 }
 
+// Per-rule coverage stats. Replays the in-file rules against the live
+// non-dir files and tallies, for each rule, how many docs it would match
+// (regex test against the rule's match field) AND how many it actually
+// wins (first-match-wins replay). Divergence = the rule is shadowed by
+// an earlier rule.
+//
+// Filename rules only for v1 — content/product rules need extracts data
+// which is more expensive and the editor surface for those is different.
+function handleClassifierRuleCoverage(kind) {
+  if (kind !== "filename") {
+    return { ok: false, error: "Coverage stats only available for filename rules in this version." };
+  }
+  let rules;
+  try { rules = readFilenameRules(); }
+  catch (e) { return { ok: false, error: e.message }; }
+
+  const compiled = [];
+  for (const r of rules) {
+    let regex = null;
+    try { regex = new RegExp(r.pattern, "i"); }
+    catch { /* skip invalid regex — show 0/0 */ }
+    compiled.push({ id: r.id, match: r.match, regex });
+  }
+
+  const db = openDb();
+  let files;
+  try {
+    files = db.prepare(`
+      SELECT f.path, f.name, p.name AS parent, f.file_type
+      FROM files f
+      LEFT JOIN files p ON p.id = f.parent_id
+      WHERE f.is_dir = 0
+    `).all();
+  } finally {
+    db.close();
+  }
+
+  const wouldMatch = Object.fromEntries(rules.map((r) => [r.id, 0]));
+  const winning    = Object.fromEntries(rules.map((r) => [r.id, 0]));
+
+  for (const f of files) {
+    const fields = { name: f.name, parent: f.parent || "", path: f.path, file_type: f.file_type || "" };
+    let won = false;
+    for (const c of compiled) {
+      if (!c.regex) continue;
+      const target = fields[c.match] ?? "";
+      if (c.regex.test(target)) {
+        wouldMatch[c.id]++;
+        if (!won) {
+          winning[c.id]++;
+          won = true;
+        }
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    kind,
+    totalFiles: files.length,
+    coverage: rules.map((r) => ({
+      id: r.id,
+      wouldMatch: wouldMatch[r.id] || 0,
+      winning:    winning[r.id]    || 0,
+    })),
+  };
+}
+
 function handleListIgnoredFolders() {
   const db = openDb();
   try {
@@ -808,6 +958,78 @@ function handleRemoveIgnoredFolder(body) {
   try {
     const r = db.prepare("DELETE FROM ignored_folders WHERE name = ?").run(name);
     return { ok: true, name, removed: Number(r.changes) };
+  } finally {
+    db.close();
+  }
+}
+
+// Lists the ignored_files table joined with files so the UI can show
+// vendor + status (still-present-on-disk vs. already-gone-from-files-row).
+function handleIgnoredFiles() {
+  const db = openDb();
+  try {
+    const rows = db.prepare(
+      `SELECT i.path        AS path,
+              i.added_at    AS added_at,
+              i.notes       AS notes,
+              v.name        AS vendor,
+              CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS in_files
+         FROM ignored_files i
+    LEFT JOIN files f   ON f.path = i.path
+    LEFT JOIN vendors v ON v.id   = f.vendor_id
+        ORDER BY i.added_at DESC, i.path`,
+    ).all();
+    return { ok: true, files: rows };
+  } finally {
+    db.close();
+  }
+}
+
+// Adds one or many paths to ignored_files. For each path we also delete
+// any matching documents row (cascades to extracts/products/document_products
+// because all those FKs are ON DELETE CASCADE). The files row itself is
+// left in place — the next ingest can drop it if needed.
+function handleAddIgnoredFiles(body) {
+  const paths = Array.isArray(body.paths)
+    ? body.paths
+    : (body.path ? [body.path] : []);
+  const cleaned = paths.map((p) => String(p || "").trim()).filter(Boolean);
+  if (cleaned.length === 0) return { ok: false, error: "No paths provided." };
+  const notes = (body.notes || "").trim() || null;
+  const db = openDb();
+  try {
+    db.exec("BEGIN");
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO ignored_files (path, added_at, notes) VALUES (?, ?, ?)",
+    );
+    const dropDoc = db.prepare(
+      "DELETE FROM documents WHERE file_id = (SELECT id FROM files WHERE path = ?)",
+    );
+    let added = 0, dropped = 0;
+    const now = new Date().toISOString();
+    for (const p of cleaned) {
+      const r = insert.run(p, now, notes);
+      if (r.changes > 0) added += 1;
+      const d = dropDoc.run(p);
+      dropped += Number(d.changes);
+    }
+    db.exec("COMMIT");
+    return { ok: true, added, dropped, total: cleaned.length };
+  } catch (e) {
+    db.exec("ROLLBACK");
+    return { ok: false, error: String(e) };
+  } finally {
+    db.close();
+  }
+}
+
+function handleRemoveIgnoredFile(body) {
+  const path = String(body.path || "").trim();
+  if (!path) return { ok: false, error: "Missing path." };
+  const db = openDb();
+  try {
+    const r = db.prepare("DELETE FROM ignored_files WHERE path = ?").run(path);
+    return { ok: true, path, removed: Number(r.changes) };
   } finally {
     db.close();
   }
@@ -882,6 +1104,7 @@ function handleDashboard() {
     const ignored = {
       types:   db.prepare("SELECT COUNT(*) AS n FROM ignored_file_types").get().n,
       folders: db.prepare("SELECT COUNT(*) AS n FROM ignored_folders").get().n,
+      files:   db.prepare("SELECT COUNT(*) AS n FROM ignored_files").get().n,
     };
 
     // Files-in-scope split. "Active" = file has a documents row (will be
@@ -922,12 +1145,29 @@ function handleDashboard() {
     const manualsWithProduct   = pctWithProduct(["installation_manual", "programming_manual", "operations_manual"]);
     const datasheetsWithProduct = pctWithProduct(["datasheet"]);
 
+    // Reverse view of "manuals with a product": how many products have at
+    // least one manual document tied to them. Pct is over total products.
+    const MANUAL_TYPES = ["installation_manual", "programming_manual", "operations_manual"];
+    const productsWithManualsRow = db.prepare(
+      `SELECT COUNT(DISTINCT dp.product_id) AS n
+       FROM document_products dp
+       JOIN documents d   ON d.id = dp.document_id
+       JOIN document_types dt ON dt.id = d.document_type_id
+       WHERE dt.name IN (${MANUAL_TYPES.map(() => "?").join(",")})`,
+    ).get(...MANUAL_TYPES);
+    const productsWithManuals = {
+      total:        counts.products,
+      withManuals:  productsWithManualsRow.n,
+      pct:          counts.products > 0 ? (productsWithManualsRow.n / counts.products) * 100 : 0,
+    };
+
     const kpis = {
       pctClassified: totalDocs > 0 ? (classifiedTotal / totalDocs) * 100 : 0,
       vendors:       counts.vendors,
       products:      counts.products,
       manualsWithProduct,
       datasheetsWithProduct,
+      productsWithManuals,
     };
 
     return {
@@ -1515,6 +1755,45 @@ function handleExtractStatus() {
   return { ok: true, status: extractor.getStatus(), extractedCount, totalPdfs };
 }
 
+// File hashing kickoff. Same shape as the extractor: caller polls
+// /api/hash-status. onlyMissing defaults true so re-clicking is cheap.
+function handleHashStart(body = {}) {
+  const onlyMissing = body.onlyMissing !== false;
+  const started = hasher.start({ openDb, onlyMissing });
+  if (!started) {
+    return { ok: false, error: "Hasher is already running.", status: hasher.getStatus() };
+  }
+  return { ok: true, status: hasher.getStatus() };
+}
+
+function handleHashStop() {
+  const stopped = hasher.stop();
+  return { ok: true, stopped, status: hasher.getStatus() };
+}
+
+function handleHashStatus() {
+  const db = openDb();
+  let hashedCount = 0, totalDocs = 0;
+  try {
+    hashedCount = db.prepare("SELECT COUNT(*) AS n FROM documents WHERE sha256 IS NOT NULL").get().n;
+    totalDocs   = db.prepare("SELECT COUNT(*) AS n FROM documents").get().n;
+  } finally {
+    db.close();
+  }
+  return { ok: true, status: hasher.getStatus(), hashedCount, totalDocs };
+}
+
+// Read-only duplicate report — returns clusters of documents sharing
+// a sha256. UI renders one section per cluster.
+function handleDuplicates() {
+  try {
+    const result = hasher.findDuplicates(openDb);
+    return { ok: true, ...result };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 function handlePurge(body) {
   const target = body.target;
   const db = openDb();
@@ -1893,10 +2172,19 @@ const PAGE = String.raw`<!DOCTYPE html>
     display: flex; align-items: center; gap: 6px;
     padding: 3px 6px; cursor: pointer; border-radius: 3px;
     font-size: 12px;
+    /* Pin everything to the left so the column of checkboxes stays in
+       a single vertical line. Without this, parent text-align rules can
+       cascade in and push later rows rightward. */
+    justify-content: flex-start; text-align: left;
+    padding-left: 0; margin-left: 0;
   }
   .multi-panel .row:hover { background: var(--hover); }
-  .multi-panel .row input { cursor: pointer; }
-  .multi-panel .row .count { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .multi-panel .row input {
+    cursor: pointer;
+    margin: 0; flex: 0 0 auto;
+  }
+  .multi-panel .row > span:not(.count) { flex: 1 1 auto; min-width: 0; text-align: left; }
+  .multi-panel .row .count { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .multi-panel .actions {
     display: flex; gap: 6px; padding: 4px 0; margin-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -2186,6 +2474,80 @@ const PAGE = String.raw`<!DOCTYPE html>
   table.dash-table td.pct { color: var(--muted); font-size: 11px; }
   table.dash-table tr.empty-type td { color: var(--muted); opacity: 0.55; }
 
+  /* Duplicate clusters report. One card per cluster: small header with the
+     short hash + count, then a table of member docs. */
+  .dup-cluster {
+    border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 14px; background: var(--bg-card, #fff);
+    overflow: hidden;
+  }
+  .dup-cluster-h {
+    padding: 8px 12px; background: var(--inset);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px; display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
+    list-style: none;
+  }
+  /* Suppress the default <summary> triangle in WebKit/Firefox so our own
+     caret is the only disclosure indicator. */
+  .dup-cluster-h::-webkit-details-marker { display: none; }
+  .dup-cluster-h::marker { content: ""; }
+  .dup-cluster-h:hover { background: var(--bg-card-hover, #f4ecf5); }
+  .dup-caret {
+    display: inline-block; width: 10px; font-size: 10px;
+    color: var(--muted); transition: transform 0.15s;
+  }
+  details.dup-cluster[open] > .dup-cluster-h .dup-caret { transform: rotate(90deg); }
+  details.dup-cluster[open] > .dup-cluster-h { border-bottom: 1px solid var(--border); }
+  /* Hide it if the section is open — the open state is the hint. */
+  .dup-toggle-hint {
+    margin-left: auto; font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  details.dup-cluster[open] > .dup-cluster-h .dup-toggle-hint::before { content: "click to collapse"; }
+  details.dup-cluster[open] > .dup-cluster-h .dup-toggle-hint { font-size: 0; }
+  details.dup-cluster[open] > .dup-cluster-h .dup-toggle-hint::before { font-size: 10px; }
+  .dup-cluster-h code {
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--accent); cursor: help;
+  }
+  .dup-count {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  table.dup-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  table.dup-table th, table.dup-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 5px 12px; text-align: left; vertical-align: top;
+  }
+  table.dup-table th {
+    color: var(--muted); font-weight: 500; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  table.dup-table tr:last-child td { border-bottom: none; }
+  td.dup-path {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    word-break: break-all;
+  }
+  /* SHA-256 cell in the documents table: short prefix in mono. Full hash
+     is on the cell's title attribute. cursor:help nudges the user to hover. */
+  td.sha-cell {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    color: var(--muted); cursor: help;
+  }
+  /* Sort affordance on column headers — pointer + tiny arrow when active.
+     Applies to every table that opts in. */
+  .sort-label {
+    cursor: pointer; user-select: none; display: inline-block;
+    max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .sort-label:hover { color: var(--accent); }
+  th .sort-label { font: inherit; }
+
   /* Classifier rule editor table — wider, editable inputs in cells. */
   table.cedit-table {
     width: 100%; border-collapse: collapse; font-size: 12px;
@@ -2237,6 +2599,79 @@ const PAGE = String.raw`<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 0.04em;
   }
   table.cedit-table tr.cedit-group-body td:first-child { padding-left: 20px; }
+
+  /* Coverage column. Tabular numbers, color-coded:
+     - clean (winning == would-match)  → muted
+     - shadowed (winning < would-match) → orange-ish accent, signals problem
+     - zero matches (would-match == 0)  → faded, signals dead rule */
+  table.cedit-table th.cedit-coverage-h {
+    text-align: right; width: 90px; white-space: nowrap;
+  }
+  table.cedit-table td.cedit-coverage {
+    text-align: right; font-variant-numeric: tabular-nums;
+    font-size: 11px; padding-right: 8px; white-space: nowrap;
+  }
+  table.cedit-table td.cedit-coverage:hover { background: var(--hover); }
+  table.cedit-table td.cedit-coverage.loading { color: var(--muted); opacity: 0.5; }
+  table.cedit-table td.cedit-coverage span.clean    { color: var(--muted); }
+  table.cedit-table td.cedit-coverage span.zero     { color: var(--muted); opacity: 0.4; }
+  table.cedit-table td.cedit-coverage span.shadowed {
+    color: #b07020; font-weight: 600;
+  }
+  table.cedit-table tr.cedit-row-selected { background: var(--accent-bg); }
+  table.cedit-table tr.cedit-row-selected td.cedit-coverage span { color: var(--accent); font-weight: 600; }
+
+  /* Split layout: rule editor on the left, live corpus preview on the right.
+     Filename rules only — content/product hide the right pane. */
+  #cedit-split {
+    height: 100%;
+    display: grid;
+    grid-template-columns: 1fr;  /* default: no pane */
+    overflow: hidden;
+  }
+  #cedit-split.with-corpus { grid-template-columns: 1fr 360px; }
+  #cedit-main-pane {
+    overflow: auto; padding: 24px 32px; min-width: 0;
+  }
+  #cedit-corpus-pane {
+    border-left: 1px solid var(--border);
+    background: var(--inset);
+    display: flex; flex-direction: column;
+    min-width: 0; overflow: hidden;
+  }
+  #cedit-corpus-header {
+    padding: 14px 16px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  #cedit-corpus-title {
+    color: var(--accent); font-weight: 600; font-size: 13px;
+  }
+  #cedit-corpus-sub {
+    color: var(--muted); font-size: 11px; margin-top: 2px;
+  }
+  #cedit-corpus-list {
+    overflow: auto; flex: 1; padding: 4px 0;
+  }
+  .cedit-corpus-item {
+    padding: 5px 16px; font-size: 11px; line-height: 1.3;
+    border-bottom: 1px solid var(--border-row);
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .cedit-corpus-item:hover { background: var(--hover); }
+  .cedit-corpus-item .name {
+    flex: 1; color: var(--text); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .cedit-corpus-item .fix {
+    color: var(--accent); cursor: pointer; font-size: 10px;
+    text-decoration: underline dotted; flex: 0 0 auto;
+  }
+  .cedit-corpus-item .fix:hover { color: var(--text); }
+  .cedit-corpus-item.matched .name { color: var(--accent); font-weight: 500; }
+  .cedit-corpus-item.dimmed { opacity: 0.35; }
+  .cedit-corpus-empty {
+    padding: 24px 16px; color: var(--muted); font-size: 12px; text-align: center;
+  }
 
   table.cedit-table td.cedit-pattern { position: relative; }
   table.cedit-table td.cedit-pattern input {
@@ -2392,7 +2827,7 @@ const PAGE = String.raw`<!DOCTYPE html>
       <span>🏠 Home</span>
     </div>
     <details>
-      <summary>Charts</summary>
+      <summary>Reports</summary>
       <div id="charts-row" class="table-row" data-view="charts">
         <span>📊 All documents</span>
       </div>
@@ -2416,6 +2851,9 @@ const PAGE = String.raw`<!DOCTYPE html>
       </div>
       <div class="chart-preset" data-preset="without-products">
         <span>↳ Documents without products</span>
+      </div>
+      <div id="duplicates-row" class="table-row" data-view="duplicates">
+        <span>🧬 Duplicates</span>
       </div>
     </details>
 
@@ -2463,6 +2901,10 @@ const PAGE = String.raw`<!DOCTYPE html>
             <td>📁 Ignored folders</td>
             <td class="count" id="ignored-folders-count">0</td>
           </tr>
+          <tr id="ignored-files-row" data-view="ignored-files">
+            <td>📄 Ignored files</td>
+            <td class="count" id="ignored-files-count">0</td>
+          </tr>
         </tbody>
       </table>
     </details>
@@ -2483,7 +2925,7 @@ const PAGE = String.raw`<!DOCTYPE html>
         <summary>Full Process</summary>
         <div class="action-row headline" data-action="run-full-process">
           Run Full Process
-          <span class="desc">Vendors + files + classify + extract + content classify</span>
+          <span class="desc">Vendors + files + hash + dedup + classify + extract + content classify + products</span>
         </div>
       </details>
       <details class="action-sub">
@@ -2496,11 +2938,18 @@ const PAGE = String.raw`<!DOCTYPE html>
         <div class="action-row" data-action="run-files">Ingest Files</div>
       </details>
       <details class="action-sub">
-        <summary>Classify &amp; Extract</summary>
+        <summary>Classify</summary>
         <div class="action-row" data-action="classify-all">
           Classify all files
           <span class="desc">Filename / path rules</span>
         </div>
+        <div class="action-row" data-action="classify-by-content">
+          Classify by extract content
+          <span class="desc">PDF-text rules; only fills empty / upgrades low</span>
+        </div>
+      </details>
+      <details class="action-sub">
+        <summary>Extract</summary>
         <div class="action-row" data-action="extract-start">
           Extract PDF text
           <span class="desc">Background; uses filesystem cache when present</span>
@@ -2509,13 +2958,21 @@ const PAGE = String.raw`<!DOCTYPE html>
           Stop extraction
           <span class="desc">Signals the worker to stop after current file</span>
         </div>
-        <div class="action-row" data-action="classify-by-content">
-          Classify by extract content
-          <span class="desc">PDF-text rules; only fills empty / upgrades low</span>
-        </div>
         <div class="action-row" data-action="classify-products">
           Extract products
           <span class="desc">Vendor-scoped rules; many-to-many to documents</span>
+        </div>
+        <div class="action-row" data-action="hash-start">
+          Hash files (sha256)
+          <span class="desc">Background; non-ignored files only; only-missing</span>
+        </div>
+        <div class="action-row" data-action="hash-stop">
+          Stop hashing
+          <span class="desc">Signals the worker to stop after current file</span>
+        </div>
+        <div class="action-row" data-action="find-duplicates">
+          Find duplicates
+          <span class="desc">Reports docs sharing a sha256</span>
         </div>
       </details>
     </details>
@@ -2526,6 +2983,8 @@ const PAGE = String.raw`<!DOCTYPE html>
       <div id="classify-status" class="extract-status">Classified: …</div>
       <div id="extract-status" class="extract-status">Extracted: …</div>
       <button id="extract-stop" class="secondary" style="display:none; margin-top: 4px;">Stop extraction</button>
+      <div id="hash-status" class="extract-status">Hashed: …</div>
+      <button id="hash-stop" class="secondary" style="display:none; margin-top: 4px;">Stop hashing</button>
     </details>
   </aside>
   <section class="content">
@@ -2610,6 +3069,13 @@ const PAGE = String.raw`<!DOCTYPE html>
         </div>
       </div>
     </div>
+    <div id="duplicates-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Duplicate documents</h2>
+      <p class="dash-sub" id="duplicates-summary" style="color: var(--muted); font-size: 12px; margin: 0 0 16px 0;">
+        Loading…
+      </p>
+      <div id="duplicates-body"></div>
+    </div>
     <div id="ignored-view" style="display:none; flex:1; overflow:auto; padding:24px 32px; max-width: 760px;">
       <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Ignored file types</h2>
       <p class="dash-sub" style="color: var(--muted); font-size: 12px; margin: 0 0 16px 0;">
@@ -2670,31 +3136,76 @@ const PAGE = String.raw`<!DOCTYPE html>
         </tbody>
       </table>
     </div>
-    <div id="classifier-editor-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
-      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
-        <h2 id="cedit-title" style="color: var(--accent); margin: 0; font-size: 22px;">Filename rules</h2>
-        <div style="font-size:12px; color:var(--muted);" id="cedit-meta">…</div>
-      </div>
-      <p class="dash-sub" id="cedit-desc" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">…</p>
+    <div id="ignored-files-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Ignored files</h2>
+      <p class="dash-sub" style="color: var(--muted); font-size: 12px; margin: 0 0 16px 0;">
+        Specific file paths excluded from the document set. Adding a file here removes its <code>documents</code> row immediately (cascading to extracts, products, etc.) so dashboards and reports update right away. The corresponding <code>files</code> row is left in place — re-ingest will skip the path next time.
+        Notes show <em>why</em>: <code>de-duplicated</code> for cluster cleanups, <code>manual</code> for one-offs.
+      </p>
 
-      <div id="cedit-error" style="display:none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; white-space: pre-wrap;"></div>
-
-      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 14px;">
-        <button id="cedit-save"    class="secondary" style="padding: 5px 14px;" disabled>Save changes</button>
-        <button id="cedit-discard" class="secondary" style="padding: 5px 14px;" disabled>Discard</button>
-        <span id="cedit-dirty" style="color: var(--muted); font-size: 12px;"></span>
-        <span id="cedit-group-controls" style="margin-left:auto; display:none;">
-          <button id="cedit-expand-all"   class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Expand all</button>
-          <button id="cedit-collapse-all" class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Collapse all</button>
-        </span>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 18px;">
+        <input id="ignored-files-input" type="text" placeholder="full path (e.g. S:\vendors\…\file.pdf)"
+               style="flex:1 1 460px; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset); font-family: ui-monospace, Menlo, monospace;">
+        <input id="ignored-files-notes" type="text" placeholder="notes (e.g. manual)" value="manual"
+               style="flex:0 0 160px; padding:5px 8px; font-size:13px; border:1px solid var(--border); border-radius:3px; background: var(--inset);">
+        <button id="ignored-files-add" class="secondary" style="padding: 5px 12px;">Add</button>
       </div>
 
-      <table class="cedit-table" id="cedit-table">
-        <thead><tr id="cedit-thead-row"></tr></thead>
-        <tbody></tbody>
+      <table class="dash-table" id="ignored-files-table">
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Vendor</th>
+            <th>Notes</th>
+            <th>Added</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="6" style="color: var(--muted); text-align:center; padding: 18px;">No ignored files yet.</td></tr>
+        </tbody>
       </table>
+    </div>
+    <div id="classifier-editor-view" style="display:none; flex:1; overflow:hidden; padding:0;">
+      <div id="cedit-split">
+        <div id="cedit-main-pane">
+          <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
+            <h2 id="cedit-title" style="color: var(--accent); margin: 0; font-size: 22px;">Filename rules</h2>
+            <div style="font-size:12px; color:var(--muted);" id="cedit-meta">…</div>
+          </div>
+          <p class="dash-sub" id="cedit-desc" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">…</p>
 
-      <button id="cedit-add" class="secondary" style="margin-top: 12px; padding: 5px 14px;">+ Add rule</button>
+          <div id="cedit-error" style="display:none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; white-space: pre-wrap;"></div>
+
+          <div style="display:flex; gap:8px; align-items:center; margin-bottom: 14px;">
+            <button id="cedit-save"    class="secondary" style="padding: 5px 14px;" disabled>Save changes</button>
+            <button id="cedit-discard" class="secondary" style="padding: 5px 14px;" disabled>Discard</button>
+            <span id="cedit-dirty" style="color: var(--muted); font-size: 12px;"></span>
+            <span id="cedit-group-controls" style="margin-left:auto; display:none;">
+              <button id="cedit-expand-all"   class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Expand all</button>
+              <button id="cedit-collapse-all" class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Collapse all</button>
+            </span>
+            <button id="cedit-corpus-toggle" class="secondary" style="margin-left:auto; padding: 5px 10px; font-size: 12px; display:none;" type="button" title="Toggle the corpus preview pane">
+              ◑ Corpus pane
+            </button>
+          </div>
+
+          <table class="cedit-table" id="cedit-table">
+            <thead><tr id="cedit-thead-row"></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <button id="cedit-add" class="secondary" style="margin-top: 12px; padding: 5px 14px;">+ Add rule</button>
+        </div>
+        <div id="cedit-corpus-pane" style="display:none;">
+          <div id="cedit-corpus-header">
+            <div id="cedit-corpus-title">Corpus preview</div>
+            <div id="cedit-corpus-sub">Click a rule's match count to filter</div>
+          </div>
+          <div id="cedit-corpus-list"></div>
+        </div>
+      </div>
     </div>
     <div id="chart-view" style="display:none; flex:1; overflow:auto; padding:14px;">
       <div id="chart-breadcrumb" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
@@ -2828,6 +3339,9 @@ const state = {
   productFilter: "",        // single-select: 'NFS2-3030' (chart drilldown)
   hasProductFilter: "",     // 'yes' | 'no' | '' — chart drilldown only
   ignoredFilter: "all",     // 'all' | 'active' | 'ignored' — files table only
+  // Per-table sort: column name + direction. Reset when switching tables.
+  sortColumn: "",
+  sortDir: "asc",
   total: 0,
   // Chart-page drilldown filter chain. Independent from the table filters
   // above — switching to charts clears it. Drilldowns compose into this.
@@ -2870,6 +3384,8 @@ function setActiveTable(name) {
   state.documentTypeFilters = [];
   state.productFilter = "";
   state.hasProductFilter = "";
+  state.sortColumn = "";
+  state.sortDir = "asc";
   state.ignoredFilter = "all";
   document.getElementById("filter").value = "";
   document.getElementById("classified-filter").value = "all";
@@ -2956,6 +3472,10 @@ function hideAllViews() {
   document.getElementById("ignored-view").style.display            = "none";
   document.getElementById("ignored-folders-view").style.display    = "none";
   document.getElementById("classifier-editor-view").style.display  = "none";
+  const dv = document.getElementById("duplicates-view");
+  if (dv) dv.style.display = "none";
+  const ifv = document.getElementById("ignored-files-view");
+  if (ifv) ifv.style.display = "none";
 }
 
 function showTableView() {
@@ -3019,6 +3539,38 @@ function setActiveHelp() {
   }
   showHelpView();
   loadDashboard();
+  // If any background worker is currently running, start auto-refreshing
+  // the dashboard so the user can watch KPIs/charts evolve. The pollers
+  // below also start/stop this when a worker transitions running.
+  if (anyWorkerRunning()) startDashboardPolling();
+}
+
+// Live-refresh the dashboard while ingest / classify / extract / hash /
+// dedup work is happening. Every 3s on the home view; a no-op when the
+// user is on any other view (no point computing KPIs the user can't see).
+let dashboardPollTimer = 0;
+const DASHBOARD_POLL_MS = 3000;
+function startDashboardPolling() {
+  if (dashboardPollTimer) return;
+  dashboardPollTimer = setInterval(() => {
+    if (state.view !== "help") return; // only refresh when home is visible
+    loadDashboard();
+  }, DASHBOARD_POLL_MS);
+}
+function stopDashboardPolling() {
+  if (!dashboardPollTimer) return;
+  clearInterval(dashboardPollTimer);
+  dashboardPollTimer = 0;
+}
+// True if any background worker the user can launch is currently running.
+// Extract + hash are the long-runners; ingest/classify are synchronous so
+// they're already finished by the time control returns. The flag
+// variables are declared further down — guard so the function works
+// before they're initialised.
+function anyWorkerRunning() {
+  const ex = (typeof extractWasRunning !== "undefined") && extractWasRunning;
+  const hs = (typeof hashWasRunning   !== "undefined") && hashWasRunning;
+  return Boolean(ex || hs);
 }
 
 function setActiveIgnored() {
@@ -3047,6 +3599,268 @@ function setActiveIgnoredFolders() {
   }
   showIgnoredFoldersView();
   loadIgnoredFolders();
+}
+
+function showIgnoredFilesView() {
+  hideAllViews();
+  document.getElementById("ignored-files-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function setActiveIgnoredFiles() {
+  state.view = "ignored-files";
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("ignored-files-row");
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
+    el.classList.add("hidden");
+  }
+  showIgnoredFilesView();
+  loadIgnoredFiles();
+}
+
+async function loadIgnoredFiles() {
+  const tbody = document.querySelector("#ignored-files-table tbody");
+  if (!tbody) return;
+  let r;
+  try {
+    r = await fetch("/api/ignored-files").then((res) => res.json());
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color: var(--danger-text);">Failed to load: ' + (e.message || e) + '</td></tr>';
+    return;
+  }
+  if (!r.ok) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color: var(--danger-text);">' + r.error + '</td></tr>';
+    return;
+  }
+  if (!r.files || r.files.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color: var(--muted); text-align:center; padding: 18px;">No ignored files yet. Add one above, or use the Duplicates report to ignore-all-but-shortest per cluster.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = "";
+  for (const f of r.files) {
+    const tr = document.createElement("tr");
+    const added = f.added_at ? new Date(f.added_at).toLocaleDateString() : "";
+    const status = f.in_files
+      ? '<span style="color: var(--muted); font-size: 11px;">in files</span>'
+      : '<span style="color: var(--muted); font-size: 11px; opacity: 0.6;">orphaned</span>';
+    const tdPath = document.createElement("td");
+    const a = document.createElement("a");
+    a.href = "#"; a.className = "open-link"; a.textContent = f.path;
+    a.title = "Open " + f.path;
+    a.addEventListener("click", (ev) => { ev.preventDefault(); openFile(f.path); });
+    tdPath.appendChild(a);
+    tdPath.style.fontFamily = "ui-monospace, Menlo, monospace";
+    tdPath.style.fontSize = "11px";
+    tdPath.style.wordBreak = "break-all";
+    tr.appendChild(tdPath);
+    tr.insertAdjacentHTML("beforeend",
+      '<td>' + (f.vendor ? escapeHtml(f.vendor) : "—") + '</td>' +
+      '<td style="color: var(--muted);">' + escapeHtml(f.notes || "") + '</td>' +
+      '<td style="color: var(--muted);">' + added + '</td>' +
+      '<td>' + status + '</td>' +
+      '<td><button class="secondary ignored-files-remove" data-path="' + escapeHtml(f.path) + '" style="padding: 2px 8px; font-size: 11px;">Restore</button></td>',
+    );
+    tbody.appendChild(tr);
+  }
+  for (const btn of tbody.querySelectorAll(".ignored-files-remove")) {
+    btn.addEventListener("click", async () => {
+      const p = btn.dataset.path;
+      const rr = await api("/api/ignored-files/remove", { path: p });
+      if (!rr.ok) { log("restore failed: " + rr.error, "err"); return; }
+      log("restored " + p + " (note: re-ingest to recreate documents row)", "ok");
+      loadIgnoredFiles();
+      refreshTableCounts();
+    });
+  }
+  enableClientSortAndResize(document.getElementById("ignored-files-table"), "ignored-files");
+}
+
+function showDuplicatesView() {
+  hideAllViews();
+  document.getElementById("duplicates-view").style.display = "block";
+  // Hide table-only toolbar bits.
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function setActiveDuplicates() {
+  state.view = "duplicates";
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("duplicates-row");
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
+    el.classList.add("hidden");
+  }
+  showDuplicatesView();
+  loadDuplicates();
+}
+
+async function loadDuplicates() {
+  const summary = document.getElementById("duplicates-summary");
+  const body    = document.getElementById("duplicates-body");
+  summary.textContent = "Loading…";
+  body.innerHTML = "";
+  let r;
+  try {
+    r = await fetch("/api/duplicates").then((res) => res.json());
+  } catch (e) {
+    summary.textContent = "Failed to load: " + e;
+    return;
+  }
+  if (!r.ok) {
+    summary.textContent = "Failed to load: " + r.error;
+    return;
+  }
+  // Also fetch hash-status so we can tell the user how many docs have
+  // actually been hashed yet — a "no duplicates" result is meaningless
+  // until the hashes exist.
+  let hs = null;
+  try {
+    hs = await fetch("/api/hash-status").then((res) => res.json());
+  } catch {}
+  const hashedNote = hs && hs.ok
+    ? hs.hashedCount + " / " + hs.totalDocs + " documents hashed"
+    : "";
+
+  if (r.clusterCount === 0) {
+    summary.innerHTML =
+      "<strong>No duplicates found</strong> across hashed documents."
+      + (hashedNote ? "  ·  " + hashedNote : "");
+    return;
+  }
+  summary.innerHTML =
+    "<strong>" + r.clusterCount + "</strong> cluster" + (r.clusterCount === 1 ? "" : "s") +
+    " of duplicates · <strong>" + r.totalDocs + "</strong> documents involved · " +
+    "<strong>" + r.wastedCopies + "</strong> redundant cop" + (r.wastedCopies === 1 ? "y" : "ies")
+    + (hashedNote ? "  ·  " + hashedNote : "");
+
+  // Render one card per cluster, wrapped in a <details> so the user can
+  // collapse / expand each cluster. The first cluster opens by default
+  // so the page isn't a wall of closed sections on first visit.
+  r.clusters.forEach((c, idx) => {
+    const card = document.createElement("details");
+    card.className = "dup-cluster";
+    if (idx === 0) card.open = true;
+    const summary = document.createElement("summary");
+    summary.className = "dup-cluster-h";
+    summary.innerHTML =
+      '<span class="dup-caret">▶</span>' +
+      '<code title="' + c.sha256 + '">' + c.sha256.slice(0, 12) + '…</code>' +
+      ' <span class="dup-count">' + c.count + ' copies</span>' +
+      ' <button type="button" class="secondary dup-cluster-ignore" style="margin-left: 12px; padding: 2px 10px; font-size: 11px;">Ignore all but shortest</button>' +
+      ' <span class="dup-toggle-hint">click to expand</span>';
+    card.appendChild(summary);
+    // Pick the shortest path as the keeper. Tie-break: lexicographic.
+    const shortest = c.docs
+      .map((d) => d.file_path || "")
+      .filter(Boolean)
+      .sort((a, b) => a.length - b.length || a.localeCompare(b))[0] || "";
+    const ignoreBtn = summary.querySelector(".dup-cluster-ignore");
+    ignoreBtn.title = "Keep " + (shortest || "(first)") + ", ignore the rest";
+    ignoreBtn.addEventListener("click", async (ev) => {
+      // Stop the click from also toggling the <details> summary.
+      ev.preventDefault();
+      ev.stopPropagation();
+      const losers = c.docs
+        .map((d) => d.file_path)
+        .filter((p) => p && p !== shortest);
+      if (losers.length === 0) return;
+      const r = await api("/api/ignored-files/add", { paths: losers, notes: "de-duplicated" });
+      if (!r.ok) { log("ignore failed: " + r.error, "err"); return; }
+      log("kept " + shortest + "; ignored " + losers.length + " duplicate" + (losers.length === 1 ? "" : "s") +
+          " (dropped " + r.dropped + " documents row" + (r.dropped === 1 ? "" : "s") + ")", "ok");
+      loadDuplicates();
+      refreshTableCounts();
+    });
+    const tbl = document.createElement("table");
+    tbl.className = "dup-table sortable-table";
+    const thead = document.createElement("thead");
+    thead.innerHTML =
+      '<tr>' +
+        '<th data-key="vendor">Vendor</th>' +
+        '<th data-key="document_type">Document type</th>' +
+        '<th data-key="file_path">Path</th>' +
+        '<th></th>' +
+      '</tr>';
+    tbl.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const d of c.docs) {
+      const tr = document.createElement("tr");
+      const tdV = document.createElement("td"); tdV.textContent = d.vendor || "—";
+      const tdT = document.createElement("td"); tdT.textContent = d.document_type || "—";
+      const tdP = document.createElement("td");
+      tdP.className = "dup-path";
+      const path = d.file_path || "";
+      if (path) {
+        // Clickable path → opens the file with the same /api/open-file
+        // route the documents table uses. Path-remapping (canonical S:\ →
+        // local) is handled server-side, so we just send the canonical
+        // string we already have.
+        const a = document.createElement("a");
+        a.href = "#";
+        a.className = "open-link";
+        a.textContent = path;
+        a.title = "Open " + path;
+        a.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          openFile(path);
+        });
+        tdP.appendChild(a);
+      } else {
+        tdP.textContent = "";
+      }
+      const tdAction = document.createElement("td");
+      tdAction.style.textAlign = "right";
+      if (path) {
+        const ig = document.createElement("a");
+        ig.href = "#"; ig.className = "open-link";
+        ig.textContent = "ignore";
+        ig.title = "Ignore this single copy (note: manual)";
+        ig.style.fontSize = "11px";
+        ig.addEventListener("click", async (ev) => {
+          ev.preventDefault();
+          const r = await api("/api/ignored-files/add", { paths: [path], notes: "manual" });
+          if (!r.ok) { log("ignore failed: " + r.error, "err"); return; }
+          log("ignored " + path, "ok");
+          loadDuplicates();
+          refreshTableCounts();
+        });
+        tdAction.appendChild(ig);
+      }
+      tr.appendChild(tdV); tr.appendChild(tdT); tr.appendChild(tdP); tr.appendChild(tdAction);
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    card.appendChild(tbl);
+    body.appendChild(card);
+    enableClientSortAndResize(tbl);
+  });
+
+  // Bulk expand / collapse controls at the top — useful with 100+ clusters.
+  const controls = document.createElement("div");
+  controls.style.cssText = "margin: 0 0 12px 0; font-size: 11px; color: var(--muted);";
+  controls.innerHTML =
+    '<a href="#" id="dup-expand-all" style="margin-right: 12px;">Expand all</a>' +
+    '<a href="#" id="dup-collapse-all">Collapse all</a>';
+  body.insertBefore(controls, body.firstChild);
+  controls.querySelector("#dup-expand-all").addEventListener("click", (e) => {
+    e.preventDefault();
+    body.querySelectorAll("details.dup-cluster").forEach((d) => { d.open = true; });
+  });
+  controls.querySelector("#dup-collapse-all").addEventListener("click", (e) => {
+    e.preventDefault();
+    body.querySelectorAll("details.dup-cluster").forEach((d) => { d.open = false; });
+  });
 }
 
 async function loadIgnoredFolders() {
@@ -3088,6 +3902,7 @@ async function loadIgnoredFolders() {
       refreshTableCounts();
     });
   }
+  enableClientSortAndResize(document.getElementById("ignored-folders-table"), "ignored-folders");
 }
 
 async function loadIgnoredTypes() {
@@ -3129,6 +3944,7 @@ async function loadIgnoredTypes() {
       refreshTableCounts();
     });
   }
+  enableClientSortAndResize(document.getElementById("ignored-table"), "ignored-types");
 }
 
 function escapeHtml(s) {
@@ -3150,6 +3966,10 @@ const cedit = {
   meta: null,                // server-supplied meta (label, columns, enums)
   pristine: [],              // last-saved rule snapshot, deep-cloned
   rules: [],                 // current edit buffer (array of plain objects)
+  coverage: null,            // { totalFiles, byId: Map<id, {winning, wouldMatch}> } | null
+  unclassified: null,        // [{ id, name, path }] cached for the corpus pane (3)
+  selectedRuleId: null,      // which rule the corpus preview is filtering by
+  corpusPaneOpen: true,      // (3) split-pane toggle
 };
 
 const CEDIT_KIND_DESC = {
@@ -3215,6 +4035,9 @@ async function loadClassifierRules(kind) {
   cedit.meta     = r.meta;
   cedit.pristine = JSON.parse(JSON.stringify(r.rules));
   cedit.rules    = JSON.parse(JSON.stringify(r.rules));
+  cedit.coverage = null;
+  cedit.unclassified = null;
+  cedit.selectedRuleId = null;
   // Switching classifiers resets which vendor groups are expanded.
   ceditOpenVendors.clear();
 
@@ -3226,8 +4049,52 @@ async function loadClassifierRules(kind) {
   const groupCtrls = document.getElementById("cedit-group-controls");
   if (groupCtrls) groupCtrls.style.display = kind === "product" ? "" : "none";
 
+  // The corpus preview pane (right side) is filename-only for v1.
+  const corpusPane = document.getElementById("cedit-corpus-pane");
+  if (corpusPane) corpusPane.style.display = kind === "filename" ? "" : "none";
+
   renderCeditTable();
   ceditUpdateButtons();
+
+  // Coverage stats — filename rules only for v1. Fire-and-forget; the table
+  // re-renders when the data arrives.
+  if (kind === "filename") {
+    loadCoverageAndCorpus();
+  }
+}
+
+async function loadCoverageAndCorpus() {
+  // Coverage stats per rule.
+  try {
+    const r = await api("/api/classifier-rules/" + cedit.kind + "/coverage");
+    if (r.ok) {
+      const byId = {};
+      for (const c of r.coverage) byId[c.id] = c;
+      cedit.coverage = { totalFiles: r.totalFiles, byId };
+      renderCeditTable();
+    }
+  } catch (e) { /* coverage is best-effort, swallow */ }
+
+  // Unclassified files for the corpus preview pane.
+  try {
+    const r = await api("/api/browse", {
+      table: "documents",
+      limit: 500,
+      offset: 0,
+      classifiedFilter: "unclassified",
+    });
+    if (r.ok) {
+      // Reduce to {id, name, path} for the preview.
+      cedit.unclassified = r.rows.map((row) => ({
+        id:   row.doc_id ?? row.id,
+        name: row.name   || row.file_name || "",
+        path: row.path   || row.file_path || "",
+        parent: row.parent || "",
+        file_type: row.file_type || "",
+      }));
+      renderCorpusPreview();
+    }
+  } catch (e) { /* preview is best-effort, swallow */ }
 }
 
 function showCeditError(msg) {
@@ -3241,12 +4108,19 @@ function renderCeditTable() {
   const tbody = document.querySelector("#cedit-table tbody");
   if (!thead || !tbody) return;
 
-  // Header row: column labels + a final actions column.
+  // Header row: column labels + (filename only) coverage column + actions.
   thead.innerHTML = "";
   for (const col of cedit.meta.columns) {
     const th = document.createElement("th");
     th.textContent = col.replace(/_/g, " ");
     thead.appendChild(th);
+  }
+  if (cedit.kind === "filename") {
+    const thCov = document.createElement("th");
+    thCov.textContent = "matches";
+    thCov.title = "winning / would-match. If they differ, the rule is shadowed by an earlier rule.";
+    thCov.className = "cedit-coverage-h";
+    thead.appendChild(thCov);
   }
   const thAct = document.createElement("th");
   thAct.textContent = "";
@@ -3397,6 +4271,37 @@ function renderCeditRow(i) {
     }
     tr.appendChild(td);
   }
+  // Coverage column (filename only): "winning / would-match" — diverging
+  // numbers mean the rule is shadowed by an earlier matching rule. Clicking
+  // selects this rule for the corpus preview pane on the right.
+  if (cedit.kind === "filename") {
+    const tdCov = document.createElement("td");
+    tdCov.className = "cedit-coverage";
+    const cov = cedit.coverage && cedit.coverage.byId[rule.id];
+    if (!cov) {
+      tdCov.textContent = "…";
+      tdCov.classList.add("loading");
+    } else {
+      const w = cov.winning, m = cov.wouldMatch;
+      const span = document.createElement("span");
+      span.textContent = w + " / " + m;
+      if (m === 0) span.classList.add("zero");
+      else if (w < m) span.classList.add("shadowed");
+      else span.classList.add("clean");
+      tdCov.appendChild(span);
+      tdCov.title = w === m
+        ? w + " docs would match and " + w + " currently win — clean."
+        : w + " win, but the regex would match " + m + ". The other " + (m - w) + " are claimed by an earlier rule (shadowed).";
+    }
+    tdCov.style.cursor = "pointer";
+    tdCov.addEventListener("click", () => {
+      cedit.selectedRuleId = (cedit.selectedRuleId === rule.id) ? null : rule.id;
+      renderCorpusPreview();
+      renderCeditTable();
+    });
+    if (cedit.selectedRuleId === rule.id) tr.classList.add("cedit-row-selected");
+    tr.appendChild(tdCov);
+  }
   // Actions column: ↑ ↓ ×
   const tdAct = document.createElement("td");
   tdAct.className = "cedit-actions";
@@ -3468,6 +4373,8 @@ async function ceditSave() {
   if (meta && cedit.meta) {
     meta.textContent = cedit.meta.file + " · " + r.count + " rule" + (r.count === 1 ? "" : "s");
   }
+  // Coverage stats reflect the saved YAML; refresh after save (filename only).
+  if (cedit.kind === "filename") loadCoverageAndCorpus();
 }
 
 function ceditDiscard() {
@@ -3476,6 +4383,69 @@ function ceditDiscard() {
   document.getElementById("cedit-error").style.display = "none";
   renderCeditTable();
   ceditUpdateButtons();
+}
+
+// Inverse-edit entry point: invoked from the documents table's per-row
+// "fix" link. Switches to the filename classifier editor, appends a stub
+// rule pre-filled with sensible defaults, and opens the regex modal with
+// this file's name as the test sample so the user can author a regex
+// starting from the misclassification they're looking at.
+async function startFixFromFile({ name, path, currentType }) {
+  if (cedit.kind && ceditIsDirty()) {
+    if (!window.confirm("You have unsaved classifier edits. Discard and start a new rule from this file?")) return;
+  }
+  // Switch to filename rules editor; loadClassifierRules awaits the GET.
+  await new Promise((resolve) => {
+    setActiveClassifierEditor("filename");
+    // setActiveClassifierEditor calls loadClassifierRules but doesn't await.
+    // Poll briefly until cedit is populated for the right kind.
+    const start = Date.now();
+    (function wait() {
+      if (cedit.kind === "filename" && cedit.meta) return resolve();
+      if (Date.now() - start > 3000) return resolve();
+      setTimeout(wait, 30);
+    })();
+  });
+  if (cedit.kind !== "filename") return;
+
+  // Append a stub rule with defaults. The user will edit name + pattern;
+  // the regex modal will help with the pattern.
+  const blank = {};
+  for (const col of cedit.meta.columns) {
+    if (col === "confidence")    blank[col] = "high";
+    else if (col === "match")    blank[col] = "name";
+    else if (col === "id")       blank[col] = "fix_" + (name.replace(/[^a-z0-9]+/gi, "_").slice(0, 24).toLowerCase() || "new");
+    else if (col === "document_type") blank[col] = "";
+    else blank[col] = "";
+  }
+  cedit.rules.push(blank);
+  renderCeditTable();
+  ceditUpdateButtons();
+
+  // Scroll the new row into view, open the regex modal with the file's
+  // name pre-loaded as the sample. The save callback writes the resulting
+  // pattern back into the new rule's pattern field.
+  setTimeout(() => {
+    const tbody = document.querySelector("#cedit-table tbody");
+    if (tbody && tbody.lastChild && tbody.lastChild.scrollIntoView) {
+      tbody.lastChild.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    openRegexModal("", (newPat) => {
+      blank.pattern = newPat;
+      renderCeditTable();
+      ceditUpdateButtons();
+    });
+    // Pre-load the sample input with this filename so the user sees match
+    // feedback immediately when they type a pattern.
+    const sample = document.getElementById("rx-sample");
+    if (sample) {
+      sample.value = name;
+      // Trigger validation so the result panel updates.
+      const ev = new Event("input");
+      sample.dispatchEvent(ev);
+    }
+  }, 60);
+  log("seeded new filename rule from " + name + (currentType ? " (currently typed " + currentType + ")" : ""), "info");
 }
 
 // --- Regex pattern modal ------------------------------------------------
@@ -3687,6 +4657,13 @@ async function loadDashboard() {
         value: fmtPct(kpis.datasheetsWithProduct.pct),
         sub: fmtN(kpis.datasheetsWithProduct.withProduct) + " / " + fmtN(kpis.datasheetsWithProduct.total),
       },
+      {
+        label: "Products with manuals",
+        value: kpis.productsWithManuals ? fmtPct(kpis.productsWithManuals.pct) : "—",
+        sub: kpis.productsWithManuals
+          ? fmtN(kpis.productsWithManuals.withManuals) + " / " + fmtN(kpis.productsWithManuals.total)
+          : undefined,
+      },
     ];
     for (const k of cards) {
       const card = document.createElement("div");
@@ -3738,6 +4715,7 @@ async function loadDashboard() {
       '<td>' + fmtN(t.low)    + ' <span class="pct">' + fmtPct(t.pctLow)    + '</span></td>';
     tbody.appendChild(tr);
   }
+  enableClientSortAndResize(document.getElementById("dash-types-table"), "dash-types");
 
   // Files-in-scope doughnut: active (has documents row) vs ignored (file
   // exists but no documents row, ie. extension on the ignore list).
@@ -3823,6 +4801,10 @@ async function refreshStatus() {
 
   updateClassifyStatus(r.classification);
   updateSidebarSummary(r);
+  // If the home dashboard is visible, refresh it on the same beat as the
+  // sidebar status. Cheap (one /api/dashboard fetch) and keeps KPIs in
+  // step with whatever just changed.
+  if (state.view === "help") loadDashboard();
 }
 
 // Light-weight version: just refresh the row counts beside each table.
@@ -3854,6 +4836,8 @@ function updateSidebarSummary(r) {
     const f = document.getElementById("ignored-folders-count");
     if (t) t.textContent = String(r.ignored.types || 0);
     if (f) f.textContent = String(r.ignored.folders || 0);
+    const fi = document.getElementById("ignored-files-count");
+    if (fi) fi.textContent = String(r.ignored.files || 0);
   }
 }
 
@@ -3928,6 +4912,104 @@ function attachResizer(th, table, col) {
   });
 }
 
+// Adds click-to-sort + drag-to-resize to any static table (one whose rows
+// all live in the DOM at once — i.e. not the server-paginated data-table).
+// Each <th> becomes clickable and gets a small ▲ / ▼ arrow when active.
+// Sorting is in-place and number-aware: cells whose textContent parses as
+// a finite number sort numerically; everything else sorts alphabetically.
+//
+// The optional second arg is a stable storage key for column widths so
+// per-column resize survives page reloads. When omitted, resize is still
+// available but widths are not persisted.
+function enableClientSortAndResize(table, storageKey) {
+  if (!table || table.dataset.sortingWired === "1") return;
+  table.dataset.sortingWired = "1";
+  const ths = Array.from(table.querySelectorAll("thead th"));
+  let sortedCol = -1;
+  let sortDir = "asc";
+
+  ths.forEach((th, idx) => {
+    const original = th.textContent;
+    th.textContent = "";
+    const label = document.createElement("span");
+    label.className = "sort-label";
+    label.textContent = original;
+    th.appendChild(label);
+
+    label.addEventListener("click", () => {
+      if (sortedCol === idx) {
+        sortDir = sortDir === "asc" ? "desc" : "asc";
+      } else {
+        sortedCol = idx;
+        sortDir = "asc";
+      }
+      sortRows(table, idx, sortDir);
+      // Refresh arrows on all headers.
+      ths.forEach((other, j) => {
+        const ll = other.querySelector(".sort-label");
+        if (!ll) return;
+        const base = ll.dataset.label || ll.textContent.replace(/ [▲▼]$/, "");
+        ll.dataset.label = base;
+        if (j === idx) {
+          ll.textContent = base + (sortDir === "desc" ? " ▼" : " ▲");
+        } else {
+          ll.textContent = base;
+        }
+      });
+    });
+
+    // Persist resize widths only when caller gives us a key. Use the
+    // header text + index as the per-column id within that key.
+    if (storageKey) {
+      const colId = original.toLowerCase().replace(/\s+/g, "_") || ("col" + idx);
+      const saved = getSavedColWidth(storageKey, colId);
+      if (saved != null) th.style.width = saved + "px";
+      attachResizer(th, storageKey, colId);
+    } else {
+      // Resize without persistence — minimal grip.
+      const grip = document.createElement("span");
+      grip.className = "col-resizer";
+      th.appendChild(grip);
+      grip.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        grip.setPointerCapture(e.pointerId);
+        const startX = e.clientX;
+        const startW = th.getBoundingClientRect().width;
+        function onMove(ev) {
+          const w = Math.max(COL_MIN_WIDTH, startW + (ev.clientX - startX));
+          th.style.width = w + "px";
+        }
+        function onUp() {
+          grip.removeEventListener("pointermove", onMove);
+          grip.removeEventListener("pointerup", onUp);
+        }
+        grip.addEventListener("pointermove", onMove);
+        grip.addEventListener("pointerup", onUp);
+      });
+    }
+  });
+}
+
+function sortRows(table, colIdx, dir) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const rows = Array.from(tbody.rows);
+  const mul = dir === "desc" ? -1 : 1;
+  rows.sort((a, b) => {
+    const av = (a.cells[colIdx]?.textContent || "").trim();
+    const bv = (b.cells[colIdx]?.textContent || "").trim();
+    // Number-aware: if both parse as finite numbers, sort numerically.
+    // Strip common formatting (commas, %) before parsing.
+    const an = parseFloat(av.replace(/[,%]/g, ""));
+    const bn = parseFloat(bv.replace(/[,%]/g, ""));
+    if (Number.isFinite(an) && Number.isFinite(bn)) return mul * (an - bn);
+    return mul * av.localeCompare(bv, undefined, { numeric: true });
+  });
+  // Reattach in new order.
+  rows.forEach((r) => tbody.appendChild(r));
+}
+
 function autoFitColumn(th, table, col) {
   // Measure widest text in this column by walking the column's tds.
   // Use a hidden canvas to measure, then add padding (10px each side, 6px for
@@ -3968,6 +5050,8 @@ async function loadRows() {
     productFilter: state.productFilter,
     hasProductFilter: state.hasProductFilter,
     ignoredFilter: state.ignoredFilter,
+    sortColumn: state.sortColumn,
+    sortDir: state.sortDir,
   });
   const thead = document.querySelector("#data-table thead");
   const tbody = document.querySelector("#data-table tbody");
@@ -3978,16 +5062,39 @@ async function loadRows() {
     return;
   }
   state.total = r.total;
-  // header — each th gets explicit width (saved or default) plus a resizer grip.
+  // header — each th gets explicit width (saved or default), a resizer grip,
+  // and a click-to-sort label. Clicking the active column toggles direction.
   const hr = document.createElement("tr");
   for (const c of r.columns) {
     const th = document.createElement("th");
-    th.textContent = c;
     th.title = c;
+    const label = document.createElement("span");
+    label.className = "sort-label";
+    let arrow = "";
+    if (state.sortColumn === c) arrow = state.sortDir === "desc" ? " ▼" : " ▲";
+    label.textContent = c + arrow;
+    label.addEventListener("click", () => {
+      if (state.sortColumn === c) {
+        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.sortColumn = c;
+        state.sortDir = "asc";
+      }
+      state.offset = 0;
+      loadRows();
+    });
+    th.appendChild(label);
     const w = getSavedColWidth(state.table, c) ?? COL_DEFAULT_WIDTH;
     th.style.width = w + "px";
     attachResizer(th, state.table, c);
     hr.appendChild(th);
+  }
+  // Trailing actions column for documents and files (per-row "ignore" link).
+  if (state.table === "documents" || state.table === "files") {
+    const thAct = document.createElement("th");
+    thAct.style.width = "60px";
+    thAct.textContent = "";
+    hr.appendChild(thAct);
   }
   thead.appendChild(hr);
   // rows
@@ -4065,6 +5172,13 @@ async function loadRows() {
             showExtract(row.document_id);
           });
           td.appendChild(a);
+        } else if (c === "sha256") {
+          // Show the first 12 chars of the hex digest in a fixed-width font
+          // and put the full 64-char hash in the title for hover.
+          const s = String(v);
+          td.textContent = s.slice(0, 12) + "…";
+          td.title = s;
+          td.classList.add("sha-cell");
         } else {
           const openPath = openablePathFor(state.table, c, row);
           if (openPath) {
@@ -4082,6 +5196,49 @@ async function loadRows() {
             td.textContent = String(v);
             td.title = String(v);
           }
+        }
+        tr.appendChild(td);
+      }
+      // Per-row trailing actions for documents and files tables.
+      // - "fix" (documents only): opens the filename rule editor with a
+      //   stub rule and the regex modal pre-loaded with this filename as
+      //   the test sample. Lets the user write a rule starting from a
+      //   misclassification they're looking at right now.
+      // - "ignore": adds the path to ignored_files (notes: "manual") and
+      //   drops the documents row so it disappears from the corpus.
+      if (state.table === "documents" || state.table === "files") {
+        const td = document.createElement("td");
+        td.style.textAlign = "right";
+        const path = row.file_path || row.path;
+        const fname = row.file_name || row.name || (path ? path.split(/[\\/]/).pop() : "");
+        const currentType = row.document_type || "";
+        if (state.table === "documents" && fname) {
+          const fix = document.createElement("a");
+          fix.href = "#"; fix.className = "open-link";
+          fix.style.fontSize = "11px"; fix.style.marginRight = "8px";
+          fix.textContent = "fix";
+          fix.title = "Open filename rule editor seeded with this file as a test sample";
+          fix.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            startFixFromFile({ name: fname, path, currentType });
+          });
+          td.appendChild(fix);
+        }
+        if (path) {
+          const a = document.createElement("a");
+          a.href = "#"; a.className = "open-link";
+          a.style.fontSize = "11px";
+          a.textContent = "ignore";
+          a.title = "Ignore this file (note: manual)";
+          a.addEventListener("click", async (ev) => {
+            ev.preventDefault();
+            const rr = await api("/api/ignored-files/add", { paths: [path], notes: "manual" });
+            if (!rr.ok) { log("ignore failed: " + rr.error, "err"); return; }
+            log("ignored " + path, "ok");
+            loadRows();
+            refreshTableCounts();
+          });
+          td.appendChild(a);
         }
         tr.appendChild(td);
       }
@@ -4774,30 +5931,38 @@ async function runPurgeTextBackups() {
   }
 }
 
-// Full Process: vendors → files → classify by filename → extract PDFs →
-// classify by content. Each stage waits for the previous to finish; the
-// extraction phase polls extract-status until idle. Buttons stay disabled
-// throughout. Runs every stage every time (idempotent by design).
+// Full Process: vendors → files → hash → dedup → classify-by-filename →
+// extract → classify-by-content → classify-products. Hash and dedup
+// happen up front so classification and the slow PDF extract never run
+// on duplicate copies. Each stage waits for the previous to finish;
+// extract and hash poll until idle. Runs every stage every time
+// (idempotent by design — only-missing flags keep re-runs cheap).
 async function runFullProcess() {
-  if (!window.confirm("Run the full process? Vendors + files ingest, then classify by filename, then extract PDFs (slow), then classify by content.")) return;
+  if (!window.confirm("Run the full process? Vendors + files, hash + de-duplicate, classify, extract PDFs (slow), classify by content, extract products.")) return;
   if (!state.listingPath) {
     log("No listing chosen. Click 'Choose folder…' first.", "err");
     return;
   }
   setIngestEnabled(false);
   log("══ Full Process: starting", "info");
+  // Keep the home dashboard live-refreshing for the full duration of the
+  // pipeline. The extract/hash status pollers handle on/off transitions
+  // for those individual stages, but ingest/classify are too short to
+  // trip those flags — start polling unconditionally here, stop in finally.
+  startDashboardPolling();
   try {
     // 1. Vendors ingest
-    log("[1/6] vendors ingest…", "info");
+    log("[1/8] vendors ingest…", "info");
     {
       const r = await api("/api/ingest", { which: "vendors", source: state.listingPath });
       if (!r.ok) { log("vendors ingest failed: " + r.error, "err"); return; }
       log("  +" + r.addedVendors + " new vendors, " + r.skippedPaths + " skipped", "ok");
     }
 
-    // 2. Files ingest
+    // 2. Files ingest. Honours ignored_files from prior runs, so paths
+    //    we de-duplicated last time stay out of documents this time.
     const useIgnores = getUseIgnores();
-    log("[2/6] files ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
+    log("[2/8] files ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
     {
       const r = await api("/api/ingest", { which: "files", source: state.listingPath, useIgnores });
       if (!r.ok) { log("files ingest failed: " + r.error, "err"); return; }
@@ -4807,8 +5972,55 @@ async function runFullProcess() {
     await refreshStatus();
     await loadRows();
 
-    // 3. Classify by filename
-    log("[3/6] classify by filename…", "info");
+    // 3. Hash files (background). Done early so dedup can run before any
+    //    classification or extraction work — no point processing copies
+    //    that we'll mark ignored a moment later.
+    log("[3/8] hash files (background)…", "info");
+    {
+      const r = await api("/api/hash-start", { onlyMissing: true });
+      if (!r.ok && !/already running/i.test(r.error || "")) {
+        log("hash-start failed: " + (r.error || "unknown"), "err");
+        return;
+      }
+    }
+    await waitForHashIdle();
+    log("  hashing phase complete", "ok");
+    await refreshStatus();
+
+    // 4. De-duplicate: pull clusters, keep the shortest path in each,
+    //    add the rest to ignored_files with note "de-duplicated".
+    //    Each /api/ignored-files/add deletes the matching documents row,
+    //    so subsequent stages skip the duplicates automatically.
+    log("[4/8] de-duplicate by hash…", "info");
+    {
+      const dr = await fetch("/api/duplicates").then((res) => res.json());
+      if (!dr.ok) { log("duplicates lookup failed: " + dr.error, "err"); return; }
+      if (dr.clusterCount === 0) {
+        log("  no duplicates found", "ok");
+      } else {
+        let losers = [];
+        for (const c of dr.clusters) {
+          const paths = c.docs.map((d) => d.file_path).filter(Boolean);
+          if (paths.length < 2) continue;
+          // Shortest path wins; lex tie-break for determinism.
+          paths.sort((a, b) => a.length - b.length || a.localeCompare(b));
+          losers = losers.concat(paths.slice(1));
+        }
+        if (losers.length === 0) {
+          log("  " + dr.clusterCount + " cluster(s) found but nothing to ignore", "ok");
+        } else {
+          const ar = await api("/api/ignored-files/add", { paths: losers, notes: "de-duplicated" });
+          if (!ar.ok) { log("ignore-add failed: " + ar.error, "err"); return; }
+          log("  " + dr.clusterCount + " cluster(s) · ignored " + ar.added +
+              " duplicate path(s) · dropped " + ar.dropped + " documents row(s)", "ok");
+        }
+      }
+    }
+    await refreshStatus();
+    await loadRows();
+
+    // 5. Classify by filename (now skips duplicates we just dropped)
+    log("[5/8] classify by filename…", "info");
     {
       const r = await api("/api/classify", {});
       if (!r.ok) { log("classify failed: " + r.error, "err"); return; }
@@ -4818,8 +6030,8 @@ async function runFullProcess() {
     }
     await refreshStatus();
 
-    // 4. Extract PDFs (background) — kick off, then poll until idle.
-    log("[4/6] extract PDF text (background, this is the slow stage)…", "info");
+    // 6. Extract PDFs (background, slow). Same dedup-aware corpus.
+    log("[6/8] extract PDF text (background, this is the slow stage)…", "info");
     {
       const r = await api("/api/extract-start", { onlyMissing: true });
       if (!r.ok && !/already running/i.test(r.error || "")) {
@@ -4831,8 +6043,8 @@ async function runFullProcess() {
     log("  extraction phase complete", "ok");
     await refreshStatus();
 
-    // 5. Classify by content
-    log("[5/6] classify by extract content (low/none only)…", "info");
+    // 7. Classify by content
+    log("[7/8] classify by extract content (low/none only)…", "info");
     {
       const r = await api("/api/classify-by-content", {});
       if (!r.ok) { log("content classify failed: " + r.error, "err"); return; }
@@ -4840,8 +6052,8 @@ async function runFullProcess() {
     }
     await refreshStatus();
 
-    // 6. Classify products (vendor-scoped rules; M:N to documents)
-    log("[6/6] classify products…", "info");
+    // 8. Classify products (vendor-scoped rules; M:N to documents)
+    log("[8/8] classify products…", "info");
     {
       const r = await api("/api/classify-products", {});
       if (!r.ok) { log("product classify failed: " + r.error, "err"); return; }
@@ -4856,6 +6068,10 @@ async function runFullProcess() {
     log("Full Process aborted: " + String(e), "err");
   } finally {
     setIngestEnabled(true);
+    // The extract/hash status pollers may have left dashboard polling on
+    // if their workers finished mid-process; full-process is over now,
+    // so shut it off (the next user action can restart it).
+    if (!anyWorkerRunning()) stopDashboardPolling();
   }
 }
 
@@ -4874,6 +6090,23 @@ async function waitForExtractIdle() {
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
   throw new Error("extraction did not finish within 12 hours");
+}
+
+async function waitForHashIdle() {
+  // Hashing is much faster than extraction (no PDF parsing) so we cap
+  // at 1 hour. If a real-world corpus needs more, raise this.
+  const HARD_TIMEOUT_MS = 60 * 60 * 1000;
+  const POLL_MS = 1000;
+  const started = Date.now();
+  while (Date.now() - started < HARD_TIMEOUT_MS) {
+    let r;
+    try {
+      r = await fetch("/api/hash-status").then((res) => res.json());
+    } catch { r = null; }
+    if (r && r.ok && r.status && !r.status.running) return;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+  throw new Error("hashing did not finish within 1 hour");
 }
 
 // Returns the row's full path string when this cell should render as a
@@ -5065,10 +6298,14 @@ async function refreshExtractStatus() {
     if (extractWasRunning) refreshTableCounts();
   }
   // If running state flipped, restart the poll loop with the appropriate
-  // cadence (fast while running, slow when idle).
+  // cadence (fast while running, slow when idle), and switch the home
+  // dashboard's auto-refresh on/off so the user can monitor progress
+  // without leaving the home view.
   if (s.running !== extractWasRunning) {
     extractWasRunning = s.running;
     restartExtractPolling();
+    if (anyWorkerRunning()) startDashboardPolling();
+    else stopDashboardPolling();
   } else {
     extractWasRunning = s.running;
   }
@@ -5084,6 +6321,80 @@ function restartExtractPolling() {
   if (extractPollTimer) clearInterval(extractPollTimer);
   const ms = extractWasRunning ? EXTRACT_POLL_FAST : EXTRACT_POLL_IDLE;
   extractPollTimer = setInterval(refreshExtractStatus, ms);
+}
+
+// --- File hashing (background) -------------------------------------------
+let hashPollTimer = 0;
+let hashWasRunning = false;
+async function refreshHashStatus() {
+  let r;
+  try {
+    r = await fetch("/api/hash-status").then((res) => res.json());
+  } catch { return; }
+  if (!r.ok) return;
+  const s = r.status;
+  const el    = document.getElementById("hash-status");
+  const stopB = document.getElementById("hash-stop");
+  if (!el) return;
+
+  const runProcessed = (s.done || 0) + (s.failed || 0) + (s.skipped || 0);
+  const pctRun = s.total > 0
+    ? Math.min(100, Math.max(0, (runProcessed / s.total) * 100))
+    : 0;
+  const pctCorpus = r.totalDocs > 0
+    ? Math.min(100, Math.max(0, (r.hashedCount / r.totalDocs) * 100))
+    : 0;
+  const pct = s.running ? pctRun : pctCorpus;
+
+  let msg;
+  if (s.running) {
+    msg = "Hashing: " + runProcessed + " / " + s.total + " (" + pct.toFixed(1) + "%)";
+    const parts = [];
+    if (s.done)    parts.push(s.done + " done");
+    if (s.failed)  parts.push(s.failed + " failed");
+    if (s.skipped) parts.push(s.skipped + " skipped");
+    if (parts.length) msg += "  ·  " + parts.join(" · ");
+    el.classList.add("running");
+    el.classList.add("with-progress");
+    el.style.setProperty("--progress", pct.toFixed(1) + "%");
+    if (stopB) stopB.style.display = "";
+    if (s.currentDoc) {
+      el.innerHTML = msg + '<div class="current"></div>';
+      el.querySelector(".current").textContent = "current: " + s.currentDoc.path;
+    } else {
+      el.textContent = msg;
+    }
+  } else {
+    msg = "Hashed: " + r.hashedCount + " / " + r.totalDocs + " documents (" + pctCorpus.toFixed(1) + "%)";
+    el.classList.remove("running");
+    el.classList.remove("with-progress");
+    el.style.removeProperty("--progress");
+    if (stopB) stopB.style.display = "none";
+    if (s.finishedAt && s.total > 0) {
+      msg += "  ·  last run: " + s.done + " done";
+      if (s.failed)  msg += ", " + s.failed + " failed";
+    }
+    el.textContent = msg;
+  }
+  if (s.running !== hashWasRunning) {
+    hashWasRunning = s.running;
+    restartHashPolling();
+    if (anyWorkerRunning()) startDashboardPolling();
+    else stopDashboardPolling();
+  } else {
+    hashWasRunning = s.running;
+  }
+}
+const HASH_POLL_FAST = 500;
+const HASH_POLL_IDLE = 3000;
+function startHashPolling() {
+  if (hashPollTimer) return;
+  hashPollTimer = setInterval(refreshHashStatus, HASH_POLL_IDLE);
+}
+function restartHashPolling() {
+  if (hashPollTimer) clearInterval(hashPollTimer);
+  const ms = hashWasRunning ? HASH_POLL_FAST : HASH_POLL_IDLE;
+  hashPollTimer = setInterval(refreshHashStatus, ms);
 }
 
 async function runExtractStart() {
@@ -5109,6 +6420,61 @@ async function runExtractStop() {
     await refreshExtractStatus();
   } catch (e) {
     log("extract-stop failed: " + String(e), "err");
+  }
+}
+
+async function runHashStart() {
+  log("Starting file hashing in the background…", "info");
+  try {
+    const r = await api("/api/hash-start", { onlyMissing: true });
+    if (!r.ok) {
+      log("hash-start failed: " + (r.error || "unknown"), "err");
+      return;
+    }
+    log("Hashing started. Status updates below.", "ok");
+    await refreshHashStatus();
+  } catch (e) {
+    log("hash-start failed: " + String(e), "err");
+  }
+}
+
+async function runHashStop() {
+  try {
+    const r = await api("/api/hash-stop", {});
+    if (r.stopped) log("Hash stop requested — finishing current file.", "info");
+    else           log("Hashing wasn't running.", "info");
+    await refreshHashStatus();
+  } catch (e) {
+    log("hash-stop failed: " + String(e), "err");
+  }
+}
+
+async function runFindDuplicates() {
+  log("Looking for duplicates…", "info");
+  try {
+    const r = await fetch("/api/duplicates").then((res) => res.json());
+    if (!r.ok) { log("duplicates failed: " + r.error, "err"); return; }
+    if (r.clusterCount === 0) {
+      log("No duplicates found across hashed documents.", "ok");
+      return;
+    }
+    log(
+      r.clusterCount + " cluster(s) of duplicates · " +
+      r.totalDocs + " total docs involved · " +
+      r.wastedCopies + " redundant cop" + (r.wastedCopies === 1 ? "y" : "ies"),
+      "ok",
+    );
+    for (const c of r.clusters.slice(0, 50)) {
+      log("  " + c.sha256.slice(0, 12) + "… × " + c.count, "info");
+      for (const d of c.docs) {
+        log("    [" + (d.vendor || "?") + "/" + (d.document_type || "?") + "] " + d.file_path, "info");
+      }
+    }
+    if (r.clusters.length > 50) {
+      log("  …and " + (r.clusters.length - 50) + " more cluster(s) (truncated)", "info");
+    }
+  } catch (e) {
+    log("duplicates failed: " + String(e), "err");
   }
 }
 
@@ -5220,6 +6586,9 @@ const ACTIONS = {
   "classify-products":   runClassifyProducts,
   "extract-start":       runExtractStart,
   "extract-stop":        runExtractStop,
+  "hash-start":          runHashStart,
+  "hash-stop":           runHashStop,
+  "find-duplicates":     runFindDuplicates,
 };
 
 document.addEventListener("click", (e) => {
@@ -5232,6 +6601,10 @@ document.addEventListener("click", (e) => {
 });
 
 document.getElementById("extract-stop").addEventListener("click", runExtractStop);
+{
+  const hashStopBtn = document.getElementById("hash-stop");
+  if (hashStopBtn) hashStopBtn.addEventListener("click", runHashStop);
+}
 document.getElementById("refresh").addEventListener("click", async () => {
   await refreshStatus();
   await loadRows();
@@ -5400,6 +6773,14 @@ document.getElementById("charts-row").addEventListener("click", () => setActiveC
 document.getElementById("help-row").addEventListener("click", setActiveHelp);
 document.getElementById("ignored-row").addEventListener("click", setActiveIgnored);
 document.getElementById("ignored-folders-row").addEventListener("click", setActiveIgnoredFolders);
+{
+  const ifr = document.getElementById("ignored-files-row");
+  if (ifr) ifr.addEventListener("click", setActiveIgnoredFiles);
+}
+{
+  const dupRow = document.getElementById("duplicates-row");
+  if (dupRow) dupRow.addEventListener("click", setActiveDuplicates);
+}
 document.getElementById("doctypes-row").addEventListener("click", () => setActiveTable("document_types"));
 
 // Classifier editor sidebar rows + editor toolbar.
@@ -5478,6 +6859,26 @@ window.addEventListener("beforeunload", (e) => {
     input.value = "";
     notes.value = "";
     loadIgnoredFolders();
+    refreshTableCounts();
+  }
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  notes.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+})();
+
+(function initIgnoredFilesForm() {
+  const input = document.getElementById("ignored-files-input");
+  const notes = document.getElementById("ignored-files-notes");
+  const btn   = document.getElementById("ignored-files-add");
+  if (!input || !btn) return;
+  async function submit() {
+    const path = input.value.trim();
+    if (!path) return;
+    const r = await api("/api/ignored-files/add", { paths: [path], notes: notes.value.trim() || "manual" });
+    if (!r.ok) { log("add failed: " + r.error, "err"); return; }
+    log("ignored " + path + (r.dropped ? " (also dropped " + r.dropped + " documents row)" : ""), "ok");
+    input.value = "";
+    if (typeof loadIgnoredFiles === "function") loadIgnoredFiles();
     refreshTableCounts();
   }
   btn.addEventListener("click", submit);
@@ -5590,6 +6991,8 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
   // picks up automatically after a page reload.
   await refreshExtractStatus();
   startExtractPolling();
+  await refreshHashStatus();
+  startHashPolling();
 
   // Default landing page is Home (dashboard). Charts/Tables remain one click away.
   setActiveHelp();
@@ -5666,6 +7069,22 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleExtractStatus());
       return;
     }
+    if (req.method === "POST" && req.url === "/api/hash-start") {
+      sendJson(res, 200, handleHashStart(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/hash-stop") {
+      sendJson(res, 200, handleHashStop());
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/hash-status") {
+      sendJson(res, 200, handleHashStatus());
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/duplicates") {
+      sendJson(res, 200, handleDuplicates());
+      return;
+    }
     if (req.method === "POST" && req.url === "/api/get-extract") {
       sendJson(res, 200, handleGetExtract(await readBody(req)));
       return;
@@ -5734,14 +7153,34 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleRemoveIgnoredFolder(await readBody(req)));
       return;
     }
+    if (req.method === "GET" && req.url === "/api/ignored-files") {
+      sendJson(res, 200, handleIgnoredFiles());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-files/add") {
+      sendJson(res, 200, handleAddIgnoredFiles(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/ignored-files/remove") {
+      sendJson(res, 200, handleRemoveIgnoredFile(await readBody(req)));
+      return;
+    }
     // Classifier rule editor: /api/classifier-rules/<kind> [GET=list, POST=save]
+    //                         /api/classifier-rules/<kind>/coverage [GET]
     if (req.url && req.url.startsWith("/api/classifier-rules/")) {
-      const kind = req.url.slice("/api/classifier-rules/".length);
-      if (req.method === "GET") {
+      const tail = req.url.slice("/api/classifier-rules/".length);
+      const slash = tail.indexOf("/");
+      const kind = slash >= 0 ? tail.slice(0, slash) : tail;
+      const sub  = slash >= 0 ? tail.slice(slash + 1) : "";
+      if (sub === "coverage" && req.method === "GET") {
+        sendJson(res, 200, handleClassifierRuleCoverage(kind));
+        return;
+      }
+      if (sub === "" && req.method === "GET") {
         sendJson(res, 200, handleListClassifierRules(kind));
         return;
       }
-      if (req.method === "POST") {
+      if (sub === "" && req.method === "POST") {
         sendJson(res, 200, handleSaveClassifierRules(kind, await readBody(req)));
         return;
       }
