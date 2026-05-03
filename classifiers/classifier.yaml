@@ -1,198 +1,748 @@
-# Filename/path-based document_type classifier rules.
-#
-# Rules are applied in order; the FIRST match wins. Put more specific patterns
-# above more general ones. Patterns are JS regexes (no leading/trailing slashes,
-# always case-insensitive).
-#
-# Each rule:
-#   id              unique short identifier (used in logs / debugging)
-#   document_type   must match a name in the document_types table
-#   confidence      high | medium | low
-#   match           which string to test: name | parent | path | file_type
-#   pattern         regex string
-#
-# `name`      = filename (e.g. "EVAX-50_Installation.pdf")
-# `parent`    = immediate parent dir name (e.g. "Manuals")
-# `path`      = full Windows path
-# `file_type` = lowercased extension with leading dot (e.g. ".pdf")
-#
-# Add as many rules as you want — no perf penalty matters at this scale.
-
 rules:
-
-  # --- Drawings: extension is unambiguous ---
   - id: dwg_extension
     document_type: drawing
     confidence: high
     match: file_type
-    pattern: '^\.(dwg|dxf)$'
-
-  # --- Listing certificates: CSFM/UL/FM/ETL or "_CSFM Listings" archive ---
+    pattern: ^\.(dwg|dxf)$
+    source_data_type: Any
   - id: csfm_archive_path
     document_type: listing_certificate
     confidence: high
     match: path
-    # Match CSFM Listings folder with or without leading underscore — the
-    # underscore convention isn't universal (Edwards uses bare "CSFM Listings").
-    pattern: '_?CSFM[\s_-]+Listings'
+    pattern: _?CSFM[\s_-]+Listings
   - id: csfm_in_name
     document_type: listing_certificate
     confidence: high
     match: name
-    pattern: '\b(csfm|ul listing|fm approv|etl listing|listing[\s_-]*cert)'
+    pattern: \b(csfm|ul listing|fm approv|etl listing|listing[\s_-]*cert)
   - id: cert_keyword
     document_type: listing_certificate
     confidence: medium
     match: name
-    pattern: '\b(certificate|certification|approval[\s_-]*letter)'
-
-  # --- Datasheets / spec sheets ---
+    pattern: \b(certificate|certification|approval[\s_-]*letter)
   - id: datasheet_filename
     document_type: datasheet
     confidence: high
     match: name
-    # `\b` treats `_` as a word char, so `5499_Datasheet` wouldn't match.
-    # Use (?:^|[\W_])…(?:[\W_]|$) so underscores and dots act as separators.
-    pattern: '(?:^|[\W_])(data[\s_-]*sheet|datasheet|spec[\s_-]*sheet|cut[\s_-]*sheet)(?:[\W_]|$)'
+    pattern: (?:^|[\W_])(data[\s_-]*sheet|datasheet|spec[\s_-]*sheet|cut[\s_-]*sheet)(?:[\W_]|$)
   - id: datasheet_parent
     document_type: datasheet
     confidence: medium
     match: parent
-    pattern: '(?:^|[\W_])(data[\s_-]*sheets?|spec[\s_-]*sheets?|cut[\s_-]*sheets?)(?:[\W_]|$)'
-
-  # --- Reporting codes ---
+    pattern: (?:^|[\W_])(data[\s_-]*sheets?|spec[\s_-]*sheets?|cut[\s_-]*sheets?)(?:[\W_]|$)
   - id: reporting_codes
     document_type: reporting_codes
     confidence: high
     match: name
-    pattern: '\breporting[\s_-]*codes?\b'
-
-  # --- Compatibility documents ---
+    pattern: \breporting[\s_-]*codes?\b
   - id: compatibility
     document_type: compatibility_document
     confidence: high
     match: name
-    pattern: '\bcompatib(ility|le)\b'
-
-  # --- Wiring guides ---
+    pattern: \bcompatib(ility|le)\b
   - id: wiring_guide
     document_type: wiring_guide
     confidence: high
     match: name
-    pattern: '\bwiring[\s_-]*(guide|diagram|manual|instructions)\b'
-
-  # --- Network guides ---
+    pattern: \bwiring[\s_-]*(guide|diagram|manual|instructions)\b
   - id: network_guide
     document_type: network_guide
     confidence: high
     match: name
-    pattern: '\bnetwork[\s_-]*(guide|manual|setup|configuration)\b'
-
-  # --- Program sheets: vendor-specific fill-in worksheets. Comes before
-  #     the programming_manual rule so a "Program Sheet" filename doesn't
-  #     accidentally hit programming_manual. ---
+    pattern: \bnetwork[\s_-]*(guide|manual|setup|configuration)\b
   - id: program_sheet
     document_type: program_sheet
     confidence: high
     match: name
-    pattern: '\bprogram[\s_-]*sheet\b'
-
-  # --- Manuals (specific before generic) ---
+    pattern: \bprogram[\s_-]*sheet\b
   - id: install_manual_filename
     document_type: installation_manual
     confidence: high
     match: name
-    pattern: '\binstall(ation|er)?[\s_-]*(manual|guide|instructions)\b'
+    pattern: \binstall(ation|er)?[\s_-]*(manual|guide|instructions)\b
   - id: install_manual_short
     document_type: installation_manual
     confidence: high
     match: name
-    pattern: '_install(ation)?\.|[\s_-]install(ation)?\.'
+    pattern: _install(ation)?\.|[\s_-]install(ation)?\.
   - id: programming_manual
     document_type: programming_manual
     confidence: high
     match: name
-    pattern: '\bprogramming[\s_-]*(manual|guide|reference)\b'
+    pattern: \bprogramming[\s_-]*(manual|guide|reference)\b
   - id: operations_manual
     document_type: operations_manual
     confidence: high
     match: name
-    pattern: '\b(operations?|user)[\s_-]*manual\b'
+    pattern: \b(operations?|user)[\s_-]*manual\b
   - id: operating_instructions
     document_type: operating_instructions
     confidence: high
     match: name
-    pattern: '\boperat(ing|ions?)[\s_-]*(instructions|guide)\b'
-
-  # --- Reference / training / inspection ---
+    pattern: \boperat(ing|ions?)[\s_-]*(instructions|guide)\b
   - id: reference_guide
     document_type: reference_guide
     confidence: high
     match: name
-    pattern: '\breference[\s_-]*(guide|manual)\b'
+    pattern: \breference[\s_-]*(guide|manual)\b
   - id: training
     document_type: training
     confidence: medium
     match: name
-    pattern: '\b(training|workbook|certif(ication|y)[\s_-]*course)\b'
+    pattern: \b(training|workbook|certif(ication|y)[\s_-]*course)\b
   - id: inspection_report
     document_type: inspection_report
     confidence: medium
     match: name
-    pattern: '\binspection[\s_-]*(report|form|record)\b'
-
-  # --- Service / field notes ---
+    pattern: \binspection[\s_-]*(report|form|record)\b
+    source_data_type: Any
   - id: service_record
     document_type: service_record
     confidence: medium
     match: name
-    pattern: '\bservice[\s_-]*(record|report|log)\b'
+    pattern: \bservice[\s_-]*(record|report|log)\b
+    source_data_type: Any
   - id: tech_note
     document_type: technician_note
     confidence: medium
     match: name
-    pattern: '\b(tech|technician)[\s_-]*notes?\b'
-
-  # --- Commercial ---
+    pattern: \b(tech|technician)[\s_-]*notes?\b
+    source_data_type: Any
   - id: contract
     document_type: contract
     confidence: medium
     match: name
-    pattern: '\b(contract|agreement|scope[\s_-]*of[\s_-]*work|sow)\b'
+    pattern: \b(contract|agreement|scope[\s_-]*of[\s_-]*work|sow)\b
+    source_data_type: Any
   - id: estimate
     document_type: estimate
     confidence: medium
     match: name
-    pattern: '\b(estimate|quote|proposal|bid|pricing[\s_-]*worksheet)\b'
-
-  # --- Design / addendum ---
+    pattern: \b(estimate|quote|proposal|bid|pricing[\s_-]*worksheet)\b
   - id: design_doc
     document_type: design_document
     confidence: medium
     match: name
-    pattern: '\b(design[\s_-]*(document|narrative|package)|riser[\s_-]*diagram|fire[\s_-]*alarm[\s_-]*calculations?)\b'
+    pattern: \b(design[\s_-]*(document|narrative|package)|riser[\s_-]*diagram|fire[\s_-]*alarm[\s_-]*calculations?)\b
+    source_data_type: Any
   - id: addendum
     document_type: addendum
     confidence: medium
     match: name
-    pattern: '\b(addendum|addenda|supplement|replacement[\s_-]*page)\b'
-
-  # --- Generic "manual" → installation_manual is the most common ---
-  # Comes last so the more specific manual patterns above win first.
+    pattern: \b(addendum|addenda|supplement|replacement[\s_-]*page)\b
   - id: generic_manual_low
     document_type: installation_manual
     confidence: low
     match: name
-    pattern: '\bmanual\b'
+    pattern: \bmanual\b
   - id: parent_manuals
     document_type: installation_manual
     confidence: low
     match: parent
-    pattern: '\bmanuals?\b'
-
-  # --- Drawings: filename hints ---
+    pattern: \bmanuals?\b
   - id: drawing_filename
     document_type: drawing
     confidence: medium
     match: name
-    pattern: '\b(diagram|schematic|floor[\s_-]*plan|panel[\s_-]*layout|riser)\b'
+    pattern: \b(diagram|schematic|floor[\s_-]*plan|panel[\s_-]*layout|riser)\b
+    source_data_type: Any
+
+  # --- JobFiles starter rules (per-job operational records) ---
+  # Filename-only first pass. Keep patterns conservative (anchored with
+  # word/non-word boundaries) so they don't fire on Vendor docs that happen
+  # to share a token. Iterate from the unclassified list after running.
+
+  - id: jf_proposal_filename
+    document_type: proposal
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])proposal(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_proposal_parent
+    document_type: proposal
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])proposals?(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_quote_filename
+    document_type: quote
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(quote|quotation)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_quote_parent
+    document_type: quote
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])(quotes?|quotations?)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_bid_workup_filename
+    document_type: bid_workup
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(bid[\s_-]*workup|takeoff|cost[\s_-]*analysis)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_bid_parent
+    document_type: bid_workup
+    confidence: low
+    match: parent
+    pattern: (?:^|[\W_])bids?(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_estimate_filename
+    document_type: estimate
+    confidence: medium
+    match: name
+    pattern: (?:^|[\W_])estimate(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_sales_order_filename
+    document_type: sales_order
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(sales[\s_-]*order|so[\s_-]*\d|sord[\s_-]*\d)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_purchase_order_filename
+    document_type: purchase_order
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(purchase[\s_-]*order|p[\s_-]*o[\s_-]*\d|po[\s_-]*\d|po[\s_-]*#)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_purchase_order_parent
+    document_type: purchase_order
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])(purchase[\s_-]*orders?|po)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_letter_of_intent_filename
+    document_type: letter_of_intent
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(letter[\s_-]*of[\s_-]*intent|loi)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_ntp_filename
+    document_type: notice_to_proceed
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(notice[\s_-]*to[\s_-]*proceed|ntp)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_install_record_filename
+    document_type: installation_record
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(nfpa[\s_-]*72|record[\s_-]*of[\s_-]*completion|inspection[\s_-]*card|certificate[\s_-]*of[\s_-]*completion)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_permit_filename
+    document_type: permit
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(permit|plan[\s_-]*check|ahj)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_permit_parent
+    document_type: permit
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])permits?(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_panel_program_extension
+    document_type: panel_program
+    confidence: high
+    match: file_type
+    pattern: ^\.(mdb|accdb|200|400|nfn|nfs|esp|prx)$
+    source_data_type: Any
+
+  - id: jf_site_photo_extension
+    document_type: site_photo
+    confidence: medium
+    match: file_type
+    pattern: ^\.(jpg|jpeg|png|heic|heif)$
+    source_data_type: Any
+  - id: jf_site_photo_parent
+    document_type: site_photo
+    confidence: high
+    match: parent
+    pattern: (?:^|[\W_])(photos?|pictures?|site[\s_-]*photos?|images?)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_site_layout_filename
+    document_type: site_layout
+    confidence: medium
+    match: name
+    pattern: (?:^|[\W_])(site[\s_-]*layout|device[\s_-]*placement)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_warranty_cert_filename
+    document_type: warranty_nfpa_cert
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(warranty|cert[\s_-]*of[\s_-]*comp(?:liance)?|certofcomp|inspection[\s_-]*test(?:ing)?[\s_-]*report|itr|nfpa)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_rfc_filename
+    document_type: rfc
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(rfc|rfi|change[\s_-]*order|co[\s_-]*\d|change[\s_-]*request)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_rfc_parent
+    document_type: rfc
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])(rf[ic]s?|change[\s_-]*orders?)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_lien_release_filename
+    document_type: lien_release
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(lien[\s_-]*release|lien[\s_-]*waiver|preliminary[\s_-]*notice|prelim[\s_-]*notice|conditional[\s_-]*release|unconditional[\s_-]*release)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_invoice_filename
+    document_type: invoice
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(invoice|inv[\s_-]*\d|billing[\s_-]*application|bill(?:ing)?[\s_-]*app)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_invoice_parent
+    document_type: invoice
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])(invoices?|billing)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_subcontract_filename
+    document_type: subcontract
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(subcontract|sub[\s_-]*contract|subcontractor[\s_-]*agreement)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_materials_list_filename
+    document_type: materials_list
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(bill[\s_-]*of[\s_-]*materials|bom|materials[\s_-]*list|materials[\s_-]*schedule|equipment[\s_-]*list)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_insurance_filename
+    document_type: insurance_doc
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(certificate[\s_-]*of[\s_-]*insurance|coi|insurance[\s_-]*cert)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_insurance_parent
+    document_type: insurance_doc
+    confidence: medium
+    match: parent
+    pattern: (?:^|[\W_])insurance(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_affidavit_filename
+    document_type: affidavit
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(affidavit|apprentice[\s_-]*cert|attestation|sworn[\s_-]*statement)(?:[\W_]|$)
+    source_data_type: Any
+
+  # --- Folder-anchored fallbacks for JobFiles ---
+  # Pyrocomm's job folders are organized into a small set of canonical
+  # buckets — Sales, Liens-Releases, Drawings, Installation Docs, Billing,
+  # Warranties-NFPA. When a filename is just a job number ("2421047 PO.pdf"),
+  # the parent folder is the only signal. These rules run after the more
+  # specific filename rules above so a strong filename match always wins.
+
+  - id: jf_lien_release_parent
+    document_type: lien_release
+    confidence: high
+    match: parent
+    pattern: ^liens?[\s_-]+releases?$
+    source_data_type: Any
+
+  - id: jf_drawing_parent
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^drawings?$
+    source_data_type: Any
+  - id: jf_drawing_approved_path
+    document_type: drawing
+    confidence: high
+    match: path
+    pattern: '[\\/]Drawings[\\/]Approved[\\/]'
+    source_data_type: Any
+  - id: jf_drawing_apvd_filename
+    document_type: drawing
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])APVD(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_drawing_asbuilt_filename
+    document_type: drawing
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(asbuilts?|as[\s_-]*builts?|abuilt|field[\s_-]*redlines?|field[\s_-]*mark[\s_-]*ups?)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_install_record_parent
+    document_type: installation_record
+    confidence: high
+    match: parent
+    pattern: ^installation[\s_-]*docs?$
+    source_data_type: Any
+  - id: jf_install_record_signoff
+    document_type: installation_record
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(sign[\s_-]*off|inspectors?[\s_-]*signature)(?:[\W_]|$)
+    source_data_type: Any
+
+  - id: jf_warranty_nfpa_parent
+    document_type: warranty_nfpa_cert
+    confidence: high
+    match: parent
+    pattern: ^warranties?[\s_-]+nfpa$
+    source_data_type: Any
+
+  # Billing folder may be one or two levels above the file
+  # (Billing\YYYY-MM\file.pdf), so match anywhere in the path.
+  - id: jf_billing_path
+    document_type: invoice
+    confidence: medium
+    match: path
+    pattern: '[\\/]Billing[\\/]'
+    source_data_type: Any
+  - id: jf_billing_info_filename
+    document_type: invoice
+    confidence: medium
+    match: name
+    pattern: (?:^|[\W_])billing[\s_-]*info(rmation)?(?:[\W_]|$)
+    source_data_type: Any
+
+  # sales_summary — internal sales-pipeline working docs. "Workup",
+  # "Summary", "Sales Entry", "SUM" abbrev, "SOF" sales order form.
+  # Bound to JobFiles only — these names are too generic for Vendor.
+  - id: jf_sales_summary_filename
+    document_type: sales_summary
+    confidence: high
+    match: name
+    pattern: (?:^|[\W_])(work[\s_-]*up|workup|sales[\s_-]*entry|sales[\s_-]*summary)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_sales_summary_summary
+    document_type: sales_summary
+    confidence: medium
+    match: name
+    pattern: (?:^|[\W_])(summary|sum)(?:[\W_]|$)
+    source_data_type: Any
+  - id: jf_sales_summary_sof
+    document_type: sales_summary
+    confidence: medium
+    match: name
+    pattern: (?:^|[\W_])sof(?:[\W_]|$)
+    source_data_type: Any
+
+  # Generic Sales-folder fallback. Low confidence so any of the stronger
+  # filename rules above (quote, proposal, po, sales_order, sales_summary,
+  # contract, etc.) outranks it. Catches the "2421047.pdf"-style files
+  # whose only classification signal is "this lives in a Sales folder."
+  - id: jf_sales_folder_path
+    document_type: sales_summary
+    confidence: low
+    match: path
+    # Must stay JobFiles-scoped: "Sales" is also the Sales-SDT root folder
+    # itself, so promoting this rule to Any would classify every Sales-SDT
+    # document as sales_summary regardless of stronger filename signals.
+    pattern: '[\\/]Sales[\\/]'
+    source_data_type: JobFiles
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Sales-corpus rules
+  # ───────────────────────────────────────────────────────────────────────
+  # Sales-corpus paths follow Sales\<salesperson>\<deal-or-project>\<bucket>\…
+  # The bucket folders are the dominant classification signal: trade-discipline
+  # plan sets (Architectural, Structural, Mechanical, …), plan submittals
+  # (Plans, Bid_Drawings, Specifications), plan-check + addenda packets, etc.
+  # Most rules are scoped Any so they also help JobFiles or Vendor docs that
+  # happen to live under similarly-named folders.
+
+  # --- Trade-discipline plan-set folders → drawing -----------------------
+  # When a Sales deal has a full bid set, sheets are split into per-trade
+  # subfolders. Anything inside is a drawing, regardless of filename.
+  - id: sales_arch_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^architectural$
+    source_data_type: Any
+  - id: sales_struct_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^structural$
+    source_data_type: Any
+  - id: sales_mech_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^mechanical$
+    source_data_type: Any
+  - id: sales_elec_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^electrical$
+    source_data_type: Any
+  - id: sales_plumb_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: ^plumbing$
+    source_data_type: Any
+
+  # --- Plan submittal folders → drawing ----------------------------------
+  # "Plans" alone, prefixed numbering ("01. Plans", "2. Plans", "127154 - 01
+  # Drawings"), bid-drawing variants, and the "Asbuilts" archive folder.
+  - id: sales_plans_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: '^(?:\d+[\.\s_-]*)*plans?$'
+    source_data_type: Any
+  - id: sales_drawings_numbered_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: '\bdrawings?$'
+    source_data_type: Any
+  - id: sales_bid_drawings_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: '^bid[\s_-]*drawings?$'
+    source_data_type: Any
+  - id: sales_asbuilts_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: '\basbuilts?$'
+    source_data_type: Any
+
+  # --- Drawing keywords in filename --------------------------------------
+  # Per-sheet labels: A-5.2, A4.20 (architectural), S101, S03 (structural),
+  # B157_R12_S02-028 (the City of Hope Warsaw / B157 internal sheet code).
+  - id: sales_b157_sheet_code
+    document_type: drawing
+    confidence: high
+    match: name
+    pattern: '\bB\d{3}[_\-]R\d+[_\-]S\d+\b'
+    source_data_type: Any
+  - id: sales_struct_sheet_code
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '(?:^|[\W_])S\d{2,3}(?:[\W_]|$)'
+    source_data_type: Any
+  - id: sales_arch_sheet_code
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '(?:^|[\W_])A[\-_]?\d{1,2}[\.\-_]\d{1,2}\b'
+    source_data_type: Any
+  - id: sales_drawing_keywords
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '\b(floor[\s_-]*plan|elevations?|sections?|reflected[\s_-]*ceiling|enlarged[\s_-]*plan|cover[\s_-]*sheet|general[\s_-]*notes?)\b'
+    source_data_type: Any
+  - id: sales_architectural_word
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '\barchitectural\b'
+    source_data_type: Any
+
+  # --- Specifications → design_document ---------------------------------
+  - id: sales_specifications_folder
+    document_type: design_document
+    confidence: high
+    match: parent
+    pattern: '^specifications?$'
+    source_data_type: Any
+  - id: sales_specifications_filename
+    document_type: design_document
+    confidence: medium
+    match: name
+    pattern: '\b(specifications?|spec[\s_-]*book)\b'
+    source_data_type: Any
+
+  # --- Bid set / estimator → bid_workup ---------------------------------
+  - id: sales_bid_set_folder
+    document_type: bid_workup
+    confidence: medium
+    match: parent
+    pattern: '\bbid[\s_-]*set\b'
+    source_data_type: Any
+  - id: sales_estimator_filename
+    document_type: bid_workup
+    confidence: medium
+    match: name
+    pattern: '\bestimator\b'
+    source_data_type: Any
+
+  # --- Plan check + addendum -------------------------------------------
+  - id: sales_plan_check_folder
+    document_type: permit
+    confidence: high
+    match: parent
+    pattern: 'plan[\s_-]*check'
+    source_data_type: Any
+  - id: sales_addendum_folder
+    document_type: addendum
+    confidence: high
+    match: parent
+    pattern: '^addend(um|a|ums)$'
+    source_data_type: Any
+
+  # --- Salesperson FA proposal sheet style ------------------------------
+  # Blanca Varney's deals use a "<project>-FA-M.D.YY.pdf" naming convention
+  # (e.g. "Cypress at Gaviota-FA-3.20.20.pdf") for fire-alarm proposal
+  # walkthroughs. "Temp FA-" is the same family for temporary panels.
+  - id: sales_fa_proposal_filename
+    document_type: proposal
+    confidence: medium
+    match: name
+    pattern: '-(?:Temp\s*)?FA-\d{1,2}\.\d{1,2}\.\d{2,4}'
+    source_data_type: Sales
+
+  # ───────────────────────────────────────────────────────────────────────
+  # Sales-corpus second-tier rules (post-archive cleanup)
+  # ───────────────────────────────────────────────────────────────────────
+  # The 10K+ remaining unclassified Sales docs are dominated by per-sheet
+  # CAD pages, project manuals, and construction-document packages whose
+  # filenames are pure sheet codes (G0.001A, S-100, A4.20, M-1.0, F1, etc.)
+  # that don't match the keyword-based drawing rules above. These rules
+  # capture those patterns broadly.
+
+  # --- CAD trade-prefix sheet codes -------------------------------------
+  # Single-letter trade prefix (A=Arch, S=Struct, M=Mech, E=Elec, P=Plumb,
+  # G=General, F=Fire/Fixture, L=Landscape, C=Civil, T=Telecom, FA=FireAlarm,
+  # FP=FireProt, MEP) followed by a sheet number with optional sub-decimal
+  # (S-100, M-1.0, A-5.2, A4.20, E-200, P1.1, G0.001, F1.1, etc.).
+  - id: sales_cad_trade_sheet_code
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '(?:^|[\W_])(?:MEP|FA|FP|[AECMSPGFLT])[\-_]?\d{1,3}[\.\-_]\d{1,3}[A-Z]?\b'
+    source_data_type: Any
+
+  # Filename starts with a short trade-prefix sheet code (S101, M-1, G0,
+  # A4, F1, L1, C1) with no further decimal — common for one-off sheets.
+  - id: sales_cad_short_sheet_code
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '^(?:MEP|FA|FP|[AECMSPGFLT])[\-_]?\d{1,3}[A-Z]?(?:[\W_]|$)'
+    source_data_type: Any
+
+  # PDF-page-split outputs (xxx.pdf-page0001.pdf style). The parent file
+  # was a drawing set, so its page splits are too.
+  - id: sales_pdf_page_split
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '[\.\-_]page\d{4}\.pdf$'
+    source_data_type: Any
+
+  # 8-digit sequence prefix + trade-prefix sheet code ("00020000 A0_1A …",
+  # "00030000 F1 …") — DocDownloads exports number every page sequentially.
+  - id: sales_seq_prefix_drawing
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '^\d{8}\s+(?:MEP|FA|FP|[AECMSPGFLT])[\-_]?\d'
+    source_data_type: Any
+
+  # --- Drawing keyword extensions ---------------------------------------
+  # Single-word "Plans" / "Plans_3rd_Floor" / "Markups" filenames; "details",
+  # "drawings", "schedules", "civil", "landscape", "lighting plan", etc.
+  - id: sales_plain_plans_filename
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '^plans?(?:[\W_]|$)|[\W_]plans?(?:_3rd_floor|_2nd_floor|_1st_floor)?(?:[\W_]|$)'
+    source_data_type: Any
+  - id: sales_drawing_keywords_v2
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '\b(?:details?|schedules?|legend|civil|landscape|lighting[\s_-]*plan|fixture[\s_-]*plan|grading[\s_-]*plan|site[\s_-]*plan|sheet[\s_-]*index|markups?|redlines?|fixture[\s_-]*count)\b'
+    source_data_type: Any
+  - id: sales_combined_filename
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '_combined\b'
+    source_data_type: Any
+
+  # --- CD percentage packages (Blanca-style 30% CD / 50% CD / 100% CD) --
+  - id: sales_cd_percentage_filename
+    document_type: drawing
+    confidence: medium
+    match: name
+    pattern: '\b\d{2,3}\s*%\s*(?:CD|construction[\s_-]*doc)'
+    source_data_type: Any
+
+  # --- Specifications variants ------------------------------------------
+  # "Specs" short folder; "BID SETS SPECS VOLUME 1", "SPECS_VOL1",
+  # "Project_Manual", "002500-Substitution-Procedures_Rev_0".
+  - id: sales_specs_folder_short
+    document_type: design_document
+    confidence: high
+    match: parent
+    pattern: '^specs?$'
+    source_data_type: Any
+  - id: sales_specs_volume_filename
+    document_type: design_document
+    confidence: medium
+    match: name
+    pattern: '\b(?:specs?[\s_-]*(?:vol|volume|book|combined)|specs?[\s_-]*v\d|project[\s_-]*manual|substitution[\s_-]*procedures|bid[\s_-]*sets[\s_-]*specs|table[\s_-]*of[\s_-]*contents)\b'
+    source_data_type: Any
+
+  # --- Bid set / Original set variants ---------------------------------
+  - id: sales_original_set_folder
+    document_type: drawing
+    confidence: high
+    match: parent
+    pattern: 'original[\s_-]*set'
+    source_data_type: Any
+  - id: sales_bid_set_path
+    document_type: drawing
+    confidence: medium
+    match: path
+    pattern: '[\\/](?:[\-\d\s_]+)?bid[\s_-]*set[s]?[\\/]'
+    source_data_type: Any
+
+  # --- Volume / discipline-bundle folders ------------------------------
+  # "Volume 1 - Architectural, Civil, Structural", "Volume 1", "Vol_II"
+  - id: sales_volume_folder
+    document_type: drawing
+    confidence: medium
+    match: parent
+    pattern: '^vol(?:ume)?[\s_-]*[ivx\d]+'
+    source_data_type: Any
+
+  # --- "Basis of Design" — engineering narratives ---------------------
+  - id: sales_basis_of_design_filename
+    document_type: design_document
+    confidence: medium
+    match: name
+    pattern: '\bbasis[\s_-]*of[\s_-]*design\b'
+    source_data_type: Any

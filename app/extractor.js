@@ -31,6 +31,17 @@ async function loadPdfjs() {
   return pdfjsLib;
 }
 
+// mammoth handles .docx text extraction. Lazy-load for the same reason
+// as pdfjs — never paid by users who don't run an extraction. .doc (the
+// legacy OLE binary format) is NOT supported by mammoth; we route only
+// .docx files through here.
+let mammothLib = null;
+async function loadMammoth() {
+  if (mammothLib) return mammothLib;
+  mammothLib = (await import("mammoth")).default;
+  return mammothLib;
+}
+
 const state = {
   running: false,
   shouldStop: false,
@@ -102,24 +113,41 @@ export function start(opts) {
   return true;
 }
 
-async function runWorker(opts) {
-  await loadPdfjs();
+// File types this extractor knows how to process. Each entry maps an
+// extension (lowercase, with leading dot) to the per-file extract fn.
+// Adding a new format = add an entry here and a matching extractFoo() —
+// the rest of the worker (queueing, caching, DB write) is format-agnostic.
+const EXTRACTORS = {
+  ".pdf":  (path) => extractPdf(path),
+  ".docx": (path) => extractDocx(path),
+};
+const EXTRACTABLE_EXTS = Object.keys(EXTRACTORS);
 
-  // Pull the work queue once at the start of the run. New PDFs added
+async function runWorker(opts) {
+  // Lazy-load every backend up front. Cheap (just module imports) and
+  // keeps us from interleaving init with the extraction loop.
+  await loadPdfjs();
+  await loadMammoth();
+
+  // Pull the work queue once at the start of the run. New files added
   // mid-run won't get picked up — caller can re-click after the run ends.
   const db = opts.openDb();
   let queue;
   try {
-    const sql = `
-      SELECT d.id AS doc_id, f.path AS file_path
-      FROM documents d
-      JOIN files f ON f.id = d.file_id
-      ${opts.onlyMissing
-        ? "LEFT JOIN document_extracts e ON e.document_id = d.id WHERE e.document_id IS NULL AND f.file_type = '.pdf'"
-        : "WHERE f.file_type = '.pdf'"}
-      ORDER BY d.id
-    `;
-    queue = db.prepare(sql).all();
+    const placeholders = EXTRACTABLE_EXTS.map(() => "?").join(",");
+    const sql = opts.onlyMissing
+      ? `SELECT d.id AS doc_id, f.path AS file_path, f.file_type AS file_type, f.corpus_root AS corpus_root
+           FROM documents d
+           JOIN files f ON f.id = d.file_id
+           LEFT JOIN document_extracts e ON e.document_id = d.id
+          WHERE e.document_id IS NULL AND f.file_type IN (${placeholders})
+          ORDER BY d.id`
+      : `SELECT d.id AS doc_id, f.path AS file_path, f.file_type AS file_type, f.corpus_root AS corpus_root
+           FROM documents d
+           JOIN files f ON f.id = d.file_id
+          WHERE f.file_type IN (${placeholders})
+          ORDER BY d.id`;
+    queue = db.prepare(sql).all(...EXTRACTABLE_EXTS);
   } finally {
     db.close();
   }
@@ -134,7 +162,13 @@ async function runWorker(opts) {
     state.currentDoc = { id: row.doc_id, path: row.file_path };
 
     const localPath = pathRemapper(row.file_path);
-    const backupPath = backupPathFor(localPath);
+    // After remapping, the file might live under a different folder than
+    // its stored corpus_root (path-remap layer). Compute the cache path
+    // against the LOCAL root: replace the canonical-root prefix in
+    // corpus_root with the remapped one. Easiest: just remap corpus_root
+    // through the same remapper.
+    const localRoot = row.corpus_root ? pathRemapper(row.corpus_root) : null;
+    const backupPath = backupPathFor(localRoot, localPath);
     const ts = new Date().toISOString();
 
     let pageCount = null, text = null, pagesJson = null, metadata = null, errMsg = null;
@@ -155,10 +189,19 @@ async function runWorker(opts) {
         if (!fs.existsSync(localPath)) {
           throw new Error("Local file not found: " + localPath);
         }
-        const result = await extractPdf(localPath);
+        // Dispatch by extension. The queue query already filtered to
+        // EXTRACTABLE_EXTS so we should always have a handler — but if
+        // the queue ever drifts (e.g. mixed-case .PDF the schema lower-
+        // cased), throw a clear error instead of silently writing nulls.
+        const ext = (row.file_type || "").toLowerCase();
+        const handler = EXTRACTORS[ext];
+        if (!handler) {
+          throw new Error("No extractor registered for file_type: " + ext);
+        }
+        const result = await handler(localPath);
         pageCount = result.pageCount;
         text      = result.text;
-        pagesJson = JSON.stringify(result.pages);
+        pagesJson = result.pages ? JSON.stringify(result.pages) : null;
         metadata  = result.metadata ? JSON.stringify(result.metadata) : null;
 
         // 2. Persist the fresh extract to the filesystem cache. Best-effort:
@@ -215,26 +258,38 @@ async function runWorker(opts) {
   }
 }
 
-// Map an absolute local PDF path to its filesystem-backup JSON path.
-// Finds the "vendors"-named segment (case-insensitive) and renames it to
-// <segment>_text. Returns null if no vendors segment exists (we won't
-// attempt to cache in that case — backup is opt-in via folder layout).
+// Map a (corpus_root, localPath, suffix) triple to its sidecar cache path.
+// The cache lives in <corpus_root>_text/, mirroring the relative path of
+// the source under corpus_root. Returns null if either input is missing
+// or the file isn't actually under the corpus root.
 //
-// Example:
-//   in:  C:\data\PyroCommData\PyroCommSubset\Vendors\Notifier\Manuals\foo.pdf
-//   out: C:\data\PyroCommData\PyroCommSubset\Vendors_text\Notifier\Manuals\foo.pdf.json
-function backupPathFor(localPath) {
-  if (!localPath) return null;
-  const parts = localPath.split(/[\\/]/);
-  const idx = parts.findIndex((p) => p.toLowerCase() === "vendors");
-  if (idx < 0) return null;
-  const newParts = parts.slice();
-  newParts[idx] = parts[idx] + "_text";
-  // Preserve the original separator style so the backup path matches
-  // the host's conventions (Windows paths stay backslashed, POSIX stays
-  // forward-slashed).
+// Example (suffix='.json'):
+//   corpus_root: C:\data\PyroCommData\PyroCommSubset\Vendors
+//   localPath:   C:\data\PyroCommData\PyroCommSubset\Vendors\Notifier\Manuals\foo.pdf
+//   out:         C:\data\PyroCommData\PyroCommSubset\Vendors_text\Notifier\Manuals\foo.pdf.json
+//
+// Used by extractor (.json) and hasher (.hash). Exported so hasher.js can
+// reuse the same routing.
+export function cachePathFor(corpusRoot, localPath, suffix) {
+  if (!corpusRoot || !localPath) return null;
   const sep = localPath.includes("\\") ? "\\" : "/";
-  return newParts.join(sep) + ".json";
+  // Trim a trailing separator on corpusRoot so prefix matching is exact.
+  const root = corpusRoot.replace(/[\\/]+$/, "");
+  // Case-insensitive prefix check — Windows paths can mix Vendors/vendors.
+  if (localPath.toLowerCase().indexOf(root.toLowerCase() + sep) !== 0) {
+    // The file isn't under the recorded corpus root. Don't cache — we
+    // don't know where to put it, and inventing a location would scatter
+    // sidecars unpredictably.
+    return null;
+  }
+  const rel = localPath.slice(root.length + 1);  // skip the separator too
+  return root + "_text" + sep + rel + suffix;
+}
+
+// Back-compat shim used by the extractor loop below. Wraps cachePathFor
+// for the .json suffix.
+function backupPathFor(corpusRoot, localPath) {
+  return cachePathFor(corpusRoot, localPath, ".json");
 }
 
 // Extract one PDF. Returns { pageCount, text, pages: [...], metadata }.
@@ -284,5 +339,35 @@ async function extractPdf(filePath) {
     text: textChunks.join("\n\n=== PAGE BREAK ===\n\n"),
     pages,
     metadata,
+  };
+}
+
+// Extract one .docx via mammoth. Returns the same shape as extractPdf so
+// the worker / cache writers are unchanged. .docx has no native page
+// concept (pagination is done at render time), so:
+//   pageCount: null  — unknown
+//   pages: null      — no per-page item list
+// The text body is the only thing we get; that's all the content rules
+// need (they match against `extract`, never against `pages_json`).
+async function extractDocx(filePath) {
+  // mammoth.extractRawText returns plain text with paragraph breaks but
+  // strips formatting, footnotes, and embedded images. That's the right
+  // tradeoff for content-rule matching — rules anchor on words, not
+  // styling. For first-page-only matching, the content classifier already
+  // takes whatever the first ~600 chars happen to be.
+  const buffer = fs.readFileSync(filePath);
+  const result = await mammothLib.extractRawText({ buffer });
+  // mammoth surfaces parser warnings on `result.messages`. Most are
+  // benign (unrecognized styles, unsupported elements). We capture the
+  // first few in metadata so they're inspectable from the extract modal,
+  // but never throw — partial text is better than no text.
+  const warnings = (result.messages || [])
+    .slice(0, 10)
+    .map((m) => m.type + ": " + m.message);
+  return {
+    pageCount: null,
+    text: result.value || "",
+    pages: null,
+    metadata: warnings.length ? { warnings } : null,
   };
 }

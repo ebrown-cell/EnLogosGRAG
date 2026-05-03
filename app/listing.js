@@ -31,41 +31,70 @@ function winParts(p) {
   return parts;
 }
 
-// Find the vendor segment of a path. Robust to either form:
-//   canonical:  S:\vendors\<vendor>\...
-//   local:      C:\data\PyroCommData\PyroCommSubset\Vendors\<vendor>\...
-// We locate any segment whose name (case-insensitive) is "vendors", then
-// take the segment immediately after it. Returns null if there isn't
-// such a segment, or if the candidate vendor is _-prefixed (archive
-// folder) or has a file extension (a stray .txt at the vendors-root).
-export function vendorOf(p) {
-  const parts = winParts(p);
-  let vendorIdx = -1;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (parts[i].toLowerCase() === "vendors") {
-      vendorIdx = i + 1;
-      break;
+// Source-data-type roots: which segment name marks the start of each
+// corpus. Match is case-insensitive; the segment AFTER this one is the
+// "owner" (vendor for Vendor corpus, job/site for JobFiles).
+const SOURCE_DATA_ROOTS = [
+  { segment: "vendors",  type: "Vendor"   },
+  { segment: "jobfiles", type: "JobFiles" },
+  // Sales: per-salesperson archives. Owner segment is the salesperson's
+  // folder name ("Blanca Varney", "Brandon Fopma", …). Personal-archive
+  // subfolders prefixed with "_" (_2018, _back up) are skipped by the
+  // existing _-prefix guard in vendorOf().
+  { segment: "sales",    type: "Sales"    },
+];
+
+// Find the source-data-type root segment in a path. Returns the index of
+// the root segment (e.g. 'vendors' or 'JobFiles') and its type, or null
+// if the path doesn't sit under any known root.
+function findSourceDataRoot(parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const lower = parts[i].toLowerCase();
+    for (const root of SOURCE_DATA_ROOTS) {
+      if (lower === root.segment) return { idx: i, type: root.type };
     }
   }
-  if (vendorIdx < 0 || vendorIdx >= parts.length) return null;
-  const seg = parts[vendorIdx];
+  return null;
+}
+
+// Source-data-type for a given path. 'Vendor' for paths under a vendors/
+// segment, 'JobFiles' for paths under a JobFiles/ segment, 'Sales' for
+// paths under a sales/ segment, 'Other' otherwise. Stamped onto each row
+// in files.source_data_type at ingest.
+export function sourceDataTypeOf(p) {
+  const root = findSourceDataRoot(winParts(p));
+  return root ? root.type : "Other";
+}
+
+// Find the "owner" segment of a path — the folder immediately after the
+// source-data-type root. Meaning depends on the corpus:
+//   Vendor:   manufacturer name (Notifier, Potter, ...)
+//   JobFiles: job/site folder    (1 Ambroise-Newport-Coast-Bordeaux Apts, ...)
+//   Sales:    salesperson folder (Blanca Varney, Brandon Fopma, ...)
+// Returns null if the path doesn't sit under any known root, or if the
+// candidate is _-prefixed (archive) or has a file extension (stray file
+// at the root level).
+export function vendorOf(p) {
+  const parts = winParts(p);
+  const root = findSourceDataRoot(parts);
+  if (!root) return null;
+  const ownerIdx = root.idx + 1;
+  if (ownerIdx >= parts.length) return null;
+  const seg = parts[ownerIdx];
   if (seg.startsWith("_")) return null;
   if (path.win32.extname(seg)) return null;
   return seg;
 }
 
-// Parent dir, or null if this path is a vendor root (its parent would
-// be the "vendors" folder which we don't model as a node).
+// Parent dir, or null if this path is at the source-data-type root level.
+// Works across both Vendor and JobFiles corpora.
 export function parentOf(p) {
   const parts = winParts(p);
-  let vendorsIdx = -1;
-  for (let i = 0; i < parts.length; i++) {
-    if (parts[i].toLowerCase() === "vendors") { vendorsIdx = i; break; }
-  }
-  if (vendorsIdx < 0) return null;
-  // Path must be at least one level below the vendors-root for it to
-  // have a parent we care about (the vendor itself, or deeper).
-  if (parts.length <= vendorsIdx + 2) return null;
+  const root = findSourceDataRoot(parts);
+  if (!root) return null;
+  // Path must be at least one level below the owner (vendor / job folder)
+  // for it to have a parent we care about.
+  if (parts.length <= root.idx + 2) return null;
   return parts.slice(0, -1).join("\\");
 }
 
@@ -130,10 +159,11 @@ export function ingestVendors(db, paths) {
 
 // --- Files-only ingest ------------------------------------------------------
 // Wipes `files` (and via ON DELETE CASCADE, `documents`) and rebuilds from
-// the listing. FAILS LOUDLY if any path's vendor segment is missing from
-// `vendors` — caller is expected to run vendors first.
+// the listing. Vendors are no longer a precondition — vendor association
+// lives on `documents.vendor_id` (nullable) and is auto-created on demand
+// for Vendor-SDT paths. JobFiles paths leave it NULL.
 //
-// We can't use INSERT OR REPLACE here: the new files schema has an integer
+// We can't use INSERT OR REPLACE here: the files schema has an integer
 // PK, so REPLACE would churn ids on every re-ingest and break parent_id
 // references mid-flight. Clean rebuild is the simpler, correct path.
 //
@@ -143,30 +173,41 @@ export function ingestFiles(db, paths, opts = {}) {
   // skip the documents row for ignored extensions. Off → fully untouched
   // ingest, useful when the user wants to see everything in one shot.
   const applyIgnores = opts.applyIgnores !== false;
+  // sourceDataType: which corpus this run owns. Re-running an ingest only
+  // clears rows tagged with this SDT — leaves the OTHER corpus alone so
+  // Vendor and JobFiles can coexist in one DB. If absent (legacy callers),
+  // we fall back to the all-corpus wipe behavior so behavior stays defined.
+  const sourceDataType = opts.sourceDataType || null;
+  // corpusRoot: absolute path of the chosen folder. Stamped onto each
+  // files row so the extract/hash caches can be routed to the sibling
+  // <corpusRoot>_text directory without segment-magic.
+  const corpusRoot = opts.corpusRoot || null;
+
+  // Vendor association is now soft + lives on documents (not files). Cache
+  // existing vendor name→id lookups so we can stamp them onto documents
+  // without a per-row roundtrip. New vendors auto-created on demand for
+  // Vendor-SDT paths only — JobFiles paths leave documents.vendor_id NULL.
   const vendorIdByName = new Map(
     db.prepare("SELECT id, name FROM vendors").all().map((r) => [r.name, r.id])
   );
+  const insertVendor = db.prepare("INSERT INTO vendors (name) VALUES (?)");
+  function getOrCreateVendorId(name) {
+    if (!name) return null;
+    let id = vendorIdByName.get(name);
+    if (id != null) return id;
+    const r = insertVendor.run(name);
+    id = Number(r.lastInsertRowid);
+    vendorIdByName.set(name, id);
+    return id;
+  }
 
-  // First pass: validate every path resolves to a known vendor.
-  const missing = new Set();
+  // First pass: just count usable paths. No vendor validation — vendor
+  // association is soft now, not a precondition.
   let usable = 0;
   let skipped = 0;
   for (const p of paths) {
-    const v = vendorOf(p);
-    if (!v) {
-      skipped++;
-      continue;
-    }
-    if (!vendorIdByName.has(v)) missing.add(v);
-    else usable++;
-  }
-  if (missing.size > 0) {
-    const sample = [...missing].slice(0, 10).join(", ");
-    throw new Error(
-      `Files ingest aborted: ${missing.size} vendor segment(s) not in vendors ` +
-        `table. Run vendors ingest first. Missing: ${sample}` +
-        (missing.size > 10 ? `, ...` : ""),
-    );
+    if (vendorOf(p) === null) { skipped++; continue; }
+    usable++;
   }
 
   // Folders to drop entirely (the folder + all descendants). Match is
@@ -199,12 +240,18 @@ export function ingestFiles(db, paths, opts = {}) {
     .sort((a, b) => a.depth - b.depth)
     .map((x) => x.p);
 
+  // ON CONFLICT(path) DO NOTHING: a duplicate path in the source listing
+  // (or a stray collision from a partial prior run) shouldn't abort the
+  // whole ingest. We skip the row and look up the existing id below so
+  // descendants still find their parent.
   const insertFile = db.prepare(
-    `INSERT INTO files (path, name, parent_id, vendor_id, file_type, is_dir, depth)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO files (path, name, parent_id, file_type, is_dir, depth, source_data_type, corpus_root)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(path) DO NOTHING`,
   );
+  const lookupFileId = db.prepare("SELECT id FROM files WHERE path = ?");
   const insertDoc = db.prepare(
-    "INSERT INTO documents (file_id, document_type_id, confidence) VALUES (?, NULL, NULL)",
+    "INSERT INTO documents (file_id, document_type_id, confidence, vendor_id) VALUES (?, NULL, NULL, ?)",
   );
 
   // Extensions to ingest as files but NOT create documents rows for.
@@ -224,14 +271,37 @@ export function ingestFiles(db, paths, opts = {}) {
 
   let docsCreated = 0;
   let docsSkipped = 0;
+  // Counter pair under incremental ingest:
+  //   filesAdded     — new files row inserted this run
+  //   filesUnchanged — path already existed; row + downstream classifications
+  //                    preserved. Ingest is additive; only Purge wipes.
+  let filesAdded = 0;
+  let filesUnchanged = 0;
+  // Per-SDT file count, populated as we walk usablePaths. Surfaced in the
+  // return value so the UI can log "Vendor: 4880, JobFiles: 2958, Sales: 142"
+  // and the user can see at a glance which corpus came in.
+  const bySourceDataType = { Vendor: 0, JobFiles: 0, Sales: 0, Other: 0 };
 
   withTx(db, () => {
-    // Wipe and start clean. ON DELETE CASCADE drops documents alongside files.
-    db.exec("DELETE FROM files");
-    db.exec("DELETE FROM documents"); // belt-and-braces; cascade should already handle it
-    db.exec("DELETE FROM sqlite_sequence WHERE name IN ('files', 'documents')");
-
+    // Incremental ingest: do NOT wipe. New paths are inserted via
+    // INSERT … ON CONFLICT(path) DO NOTHING below; paths that already
+    // exist keep their id (and therefore their downstream rows in
+    // documents / document_extracts / document_buildings / etc).
+    // Use the Purge actions to wipe — ingest is now additive only.
+    //
+    // Pre-seed idByPath with existing rows so a fresh insert of a child
+    // file finds its existing parent directory's id without a per-row
+    // SELECT. Scope to the active SDT (or all rows for a global ingest)
+    // so the map stays bounded.
     const idByPath = new Map();
+    {
+      const seedSql = sourceDataType
+        ? "SELECT id, path FROM files WHERE source_data_type = ?"
+        : "SELECT id, path FROM files";
+      const stmt = db.prepare(seedSql);
+      const rows = sourceDataType ? stmt.all(sourceDataType) : stmt.all();
+      for (const r of rows) idByPath.set(r.path, r.id);
+    }
 
     for (const p of usablePaths) {
       const v = vendorOf(p);
@@ -242,23 +312,47 @@ export function ingestFiles(db, paths, opts = {}) {
       const parentPath = parentOf(p);
       const parentId = parentPath ? idByPath.get(parentPath) ?? null : null;
 
+      const sdt = sourceDataTypeOf(p);
+      bySourceDataType[sdt] = (bySourceDataType[sdt] || 0) + 1;
       const result = insertFile.run(
         p,
         name,
         parentId,
-        vendorIdByName.get(v),
         ext,
         isFile ? 0 : 1,
         parts.length - 1,
+        sdt,
+        corpusRoot,
       );
-      const fileId = Number(result.lastInsertRowid);
-      idByPath.set(p, fileId);
+      // changes === 0 means the path already existed in files. Under
+      // incremental ingest that's the common case, not an error. Look up
+      // the existing row so descendants can still resolve their parent_id,
+      // and skip creating a second documents row for it (any prior
+      // documents/document_buildings/etc rows are intentionally preserved).
+      let fileId;
+      let isNewFile;
+      if (result.changes === 0) {
+        // Pre-seeded idByPath usually has it; lookup is the fallback for
+        // paths under a different SDT seen mid-loop.
+        fileId = idByPath.get(p) ?? lookupFileId.get(p)?.id ?? null;
+        isNewFile = false;
+        filesUnchanged++;
+      } else {
+        fileId = Number(result.lastInsertRowid);
+        isNewFile = true;
+        filesAdded++;
+      }
+      if (fileId !== null) idByPath.set(p, fileId);
 
-      if (isFile) {
+      if (isFile && isNewFile && fileId !== null) {
         if (ignoredExts.has(ext) || ignoredPaths.has(p)) {
           docsSkipped++;
         } else {
-          insertDoc.run(fileId);
+          // Vendor association: only for Vendor-SDT paths. JobFiles paths
+          // (and any 'Other') leave documents.vendor_id NULL — the owner
+          // segment in those paths is a job/site name, not a manufacturer.
+          const docVendorId = sdt === "Vendor" ? getOrCreateVendorId(v) : null;
+          insertDoc.run(fileId, docVendorId);
           docsCreated++;
         }
       }
@@ -267,11 +361,16 @@ export function ingestFiles(db, paths, opts = {}) {
 
   return {
     lines: paths.length,
-    files: usable - folderSkipped,
+    // Total files rows touched by this listing (added + unchanged), kept
+    // under the legacy `files` key so existing UI logging keeps working.
+    files: filesAdded + filesUnchanged,
+    filesAdded,
+    filesUnchanged,
     docsCreated,
     docsSkipped,
     folderSkipped,
     skippedPaths: skipped,
     applyIgnores,
+    bySourceDataType,
   };
 }

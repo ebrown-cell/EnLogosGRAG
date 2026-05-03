@@ -1,0 +1,23 @@
+# Building extractor rules.
+#
+# Rules in this file run alongside the algorithmic building matcher (the
+# token + street-address strategies in buildings_matcher.js). The matcher
+# does broad coverage automatically; rules are the user's hand-curated
+# overrides for specific patterns the matcher misses or gets wrong.
+#
+# Each rule binds a regex match against name/path/first_page/extract to a
+# canonical building. The `building_uid` field accepts either a literal
+# 16-char Kent UID (e.g. "BLD-a9f9dc4860d4") or a regex capture-group
+# reference like "$1" — though for buildings, capture refs are rarely
+# useful since canonical UIDs aren't embedded in document paths.
+#
+# Building extraction runs only against documents whose source_data_type
+# is JobFiles — Vendor docs don't reference job sites.
+#
+# The JobFiles folder convention "<address>-<city>-<bldg>-<job#>\..." is
+# already handled by the auto-matcher's street-address strategy: it tokenizes
+# the full file path, finds "<number> <word>(<word>)" sequences, and looks
+# them up in building_addresses.raw_street. So per-folder rules are unneeded
+# for that case — add a rule here only when you see a specific document the
+# auto-matcher misses or assigns to the wrong building.
+rules: []

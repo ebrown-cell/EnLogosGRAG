@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(curl -s http://localhost:4099/health)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(taskkill //F //PID 23764)",
+      "Bash(curl -sf http://localhost:4099/health -o /dev/null)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosMCP log --oneline -5)",
+      "Bash(git -C C:/data/dev/GitHub/AstroBoy status)",
+      "Bash(git -C C:/data/dev/GitHub/AstroBoy diff --stat)",
+      "Bash(git -C C:/data/dev/GitHub/AstroBoy log --oneline -5)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosMCP check-ignore -v .env)",
+      "Bash(git -C C:/data/dev/GitHub/AstroBoy check-ignore -v .env)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosGRAG diff package.json)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosGRAG diff package-lock.json)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosGRAG diff app/db.js)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosGRAG add -A)",
+      "Bash(git -C c:/data/dev/GitHub/EnLogosGRAG commit -m ' *)"
+    ],
+    "additionalDirectories": [
+      "C:\\data\\dev\\GitHub\\AstroBoy"
+    ]
+  }
+}

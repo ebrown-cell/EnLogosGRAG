@@ -1,0 +1,20 @@
+# Vendor extractor rules.
+#
+# Each rule binds a regex match against name/path/first_page/extract to a
+# vendor name. The vendor field accepts either a literal name ("Notifier")
+# OR a regex capture-group reference ("$1", "$2", …) that pulls the name
+# directly from the matched text. Capture-group rules let one entry cover
+# all sites whose path layout puts the vendor in a known segment.
+#
+# Vendor extraction runs only against documents whose source_data_type is
+# Vendor — JobFiles documents don't reference manufacturers.
+rules:
+  # The historical layout: <root>/vendors/<NAME>/...  Captures whatever
+  # name segment follows the literal "vendors" folder. Highest confidence
+  # because a vendor named in the on-disk layout is unambiguous.
+  - id: vendor_path_segment
+    confidence: high
+    match: path
+    pattern: '[\\/]vendors[\\/]([^\\/]+)'
+    vendor: "$1"
+    source_data_type: Vendor

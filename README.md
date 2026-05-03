@@ -93,9 +93,10 @@ app/
   extractor.js          pdfjs-dist worker (singleton, resumable)
   classifier.js         filename + content classifiers
 classifiers/
-  classifier.yaml          filename rules
-  content_classifier.yaml  content rules
-  product_classifier.yaml  vendor → product rules
+  classifier.yaml          filename rules (→ document_type)
+  content_classifier.yaml  content rules (→ document_type)
+extractors/
+  product_extractor.yaml   vendor → product extraction rules
 public/
   help.html             standalone help page served at /help
 db/

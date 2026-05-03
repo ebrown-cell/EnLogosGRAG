@@ -8,13 +8,16 @@
 // so they're naturally skipped.
 
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
+import { cachePathFor } from "./extractor.js";
 
 const state = {
   running: false,
   shouldStop: false,
   total: 0,           // documents to consider this batch
-  done: 0,            // newly hashed this batch
+  done: 0,            // newly hashed this batch (computed digest from disk)
+  cached: 0,          // restored from .hash sidecar (no read of source file)
   skipped: 0,         // already had sha256 (only-missing mode)
   failed: 0,          // file open / read errors
   currentDoc: null,   // {id, path}
@@ -46,6 +49,7 @@ export function start(opts) {
   state.shouldStop = false;
   state.total = 0;
   state.done = 0;
+  state.cached = 0;
   state.skipped = 0;
   state.failed = 0;
   state.currentDoc = null;
@@ -73,12 +77,12 @@ async function runWorker(opts) {
   let queue;
   try {
     const sql = onlyMissing
-      ? `SELECT d.id AS doc_id, f.path AS file_path
+      ? `SELECT d.id AS doc_id, f.path AS file_path, f.corpus_root AS corpus_root
            FROM documents d
            JOIN files f ON f.id = d.file_id
           WHERE d.sha256 IS NULL AND f.is_dir = 0
           ORDER BY d.id`
-      : `SELECT d.id AS doc_id, f.path AS file_path
+      : `SELECT d.id AS doc_id, f.path AS file_path, f.corpus_root AS corpus_root
            FROM documents d
            JOIN files f ON f.id = d.file_id
           WHERE f.is_dir = 0
@@ -94,8 +98,36 @@ async function runWorker(opts) {
     state.currentDoc = { id: row.doc_id, path: row.file_path };
 
     const localPath = pathRemapper(row.file_path);
+    const localRoot = row.corpus_root ? pathRemapper(row.corpus_root) : null;
+    const sidecarPath = cachePathFor(localRoot, localPath, ".hash");
+
+    let digest = null;
+    let fromCache = false;
     try {
-      const digest = await sha256OfFile(localPath);
+      // 1. Try the sidecar cache first. A previously-computed digest
+      //    sits at <corpus_root>_text/<rel>.hash as plain hex.
+      if (sidecarPath && fs.existsSync(sidecarPath)) {
+        const cached = fs.readFileSync(sidecarPath, "utf8").trim();
+        if (/^[0-9a-f]{64}$/i.test(cached)) {
+          digest = cached.toLowerCase();
+          fromCache = true;
+        }
+      }
+      // 2. Compute from disk if no usable cache.
+      if (!digest) {
+        digest = await sha256OfFile(localPath);
+        // 3. Persist to the sidecar — best-effort. A read-only volume or
+        //    permission failure shouldn't fail the hash run.
+        if (sidecarPath) {
+          try {
+            fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+            fs.writeFileSync(sidecarPath, digest + "\n", "utf8");
+          } catch (e) {
+            console.warn("[hasher] sidecar write failed:", sidecarPath, e.message);
+          }
+        }
+      }
+
       const wdb = opts.openDb();
       try {
         wdb.prepare("UPDATE documents SET sha256 = ? WHERE id = ?")
@@ -103,10 +135,19 @@ async function runWorker(opts) {
       } finally {
         wdb.close();
       }
-      state.done += 1;
+      if (fromCache) state.cached += 1;
+      else           state.done   += 1;
     } catch (e) {
       state.failed += 1;
       state.lastError = `${row.file_path}: ${e.message}`;
+    }
+
+    // Yield to the event loop every 25 items so /api/hash-status can respond
+    // mid-batch. Cached restores are sub-millisecond — without yielding,
+    // the entire run completes before the client can poll for progress.
+    const processed = state.done + state.cached + state.failed;
+    if (processed % 25 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 }
@@ -144,7 +185,7 @@ export function findDuplicates(openDb) {
               dt.name AS document_type
          FROM documents d
          JOIN files f          ON f.id = d.file_id
-         LEFT JOIN vendors v   ON v.id = f.vendor_id
+         LEFT JOIN vendors v   ON v.id = d.vendor_id
          LEFT JOIN document_types dt ON dt.id = d.document_type_id
         WHERE d.sha256 = ?
         ORDER BY f.path`,

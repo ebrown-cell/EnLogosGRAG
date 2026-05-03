@@ -1,187 +1,367 @@
-# Content-based document_type classifier rules.
-#
-# Same shape as classifier.yaml, but `match` selects which extracted text
-# to test against:
-#   first_page  → the first ~PDF page break (best signal — covers/title pages)
-#   extract     → the full extracted text
-#
-# First match wins. Place specific patterns above general ones. Patterns
-# are JS regexes (no leading/trailing slashes), case-insensitive.
-
 rules:
-
-  # --- Listing certificates: very strong cover-page signals ---
   - id: csfm_cert
     document_type: listing_certificate
     confidence: high
     match: first_page
-    pattern: 'California State Fire Marshal'
+    pattern: California State Fire Marshal
   - id: ul_listing_cert
     document_type: listing_certificate
     confidence: high
     match: first_page
-    pattern: '\b(UL Listed|UL Listing|Underwriters Laboratories)\b.{0,200}\b(certificate|listing\s*card|approval)\b'
+    pattern: \b(UL Listed|UL Listing|Underwriters
+      Laboratories)\b.{0,200}\b(certificate|listing\s*card|approval)\b
   - id: fm_listing_cert
     document_type: listing_certificate
     confidence: high
     match: first_page
-    pattern: '\b(Factory Mutual|FM Approval|FM Approved)\b'
+    pattern: \b(Factory Mutual|FM Approval|FM Approved)\b
   - id: etl_listing_cert
     document_type: listing_certificate
     confidence: medium
     match: first_page
-    pattern: '\bETL Listed\b|\bIntertek\s+Listed\b'
-
-  # --- Datasheets: cover-page anchors ---
+    pattern: \bETL Listed\b|\bIntertek\s+Listed\b
   - id: datasheet_first_page
     document_type: datasheet
     confidence: high
     match: first_page
-    pattern: '\b(Data\s*Sheet|Spec(ification)?\s*Sheet|Cut\s*Sheet|Product\s*Data)\b'
+    pattern: \b(Data\s*Sheet|Spec(ification)?\s*Sheet|Cut\s*Sheet|Product\s*Data)\b
   - id: datasheet_specs_section
     document_type: datasheet
     confidence: medium
     match: first_page
-    pattern: '\b(Electrical\s+Specifications?|Mechanical\s+Specifications?|Storage\s+Temperature|Operating\s+Temperature)\b'
-
-  # --- Installation manual: very strong title-page indicators ---
+    pattern: \b(Electrical\s+Specifications?|Mechanical\s+Specifications?|Storage\s+Temperature|Operating\s+Temperature)\b
   - id: install_manual_first_page
     document_type: installation_manual
     confidence: high
     match: first_page
-    pattern: '\b(Installation\s+(Manual|Guide|Instructions?))\b'
+    pattern: \b(Installation\s+(Manual|Guide|Instructions?))\b
   - id: install_manual_body
     document_type: installation_manual
     confidence: medium
     match: extract
-    pattern: '\b(prior to installation|mounting requirements|backbox dimensions|conduit knockouts)\b'
-
-  # --- Programming manual: distinct vocabulary ---
+    pattern: \b(prior to installation|mounting requirements|backbox
+      dimensions|conduit knockouts)\b
   - id: programming_manual_first_page
     document_type: programming_manual
     confidence: high
     match: first_page
-    pattern: '\b(Programming\s+(Manual|Guide|Reference|Handbook))\b'
+    pattern: \b(Programming\s+(Manual|Guide|Reference|Handbook))\b
   - id: programming_manual_body
     document_type: programming_manual
     confidence: medium
     match: extract
-    pattern: '\b(default\s+(installer|master)\s+code|enter\s+programming\s+mode|press\s+\*\s*8\s+to\s+enter)\b'
-
-  # --- Operations / operating instructions ---
+    pattern: \b(default\s+(installer|master)\s+code|enter\s+programming\s+mode|press\s+\*\s*8\s+to\s+enter)\b
   - id: operations_manual_first_page
     document_type: operations_manual
     confidence: high
     match: first_page
-    pattern: '\b(Operation(s)?\s+Manual|User\s+Manual|Owner''?s?\s+Manual)\b'
+    pattern: \b(Operation(s)?\s+Manual|User\s+Manual|Owner'?s?\s+Manual)\b
   - id: operating_instructions_first_page
     document_type: operating_instructions
     confidence: high
     match: first_page
-    pattern: '\bOperating\s+Instructions\b'
-
-  # --- Wiring guide ---
+    pattern: \bOperating\s+Instructions\b
   - id: wiring_guide_first_page
     document_type: wiring_guide
     confidence: high
     match: first_page
-    pattern: '\bWiring\s+(Guide|Diagram|Manual|Instructions?)\b'
+    pattern: \bWiring\s+(Guide|Diagram|Manual|Instructions?)\b
   - id: wiring_guide_body
     document_type: wiring_guide
     confidence: medium
     match: extract
-    pattern: '\b(twisted\s+pair|shielded\s+cable|AWG\s+(14|16|18|22)|loop\s+wiring|class\s+[AB]\s+wiring)\b'
-
-  # --- Reporting codes ---
+    pattern: \b(twisted\s+pair|shielded\s+cable|AWG\s+(14|16|18|22)|loop\s+wiring|class\s+[AB]\s+wiring)\b
   - id: reporting_codes_first_page
     document_type: reporting_codes
     confidence: high
     match: first_page
-    pattern: '\b(Reporting\s+Codes?|Event\s+Codes?|Fault\s+Codes?|Trouble\s+Codes?)\b'
-
-  # --- Compatibility document ---
+    pattern: \b(Reporting\s+Codes?|Event\s+Codes?|Fault\s+Codes?|Trouble\s+Codes?)\b
   - id: compatibility_first_page
     document_type: compatibility_document
     confidence: high
     match: first_page
-    pattern: '\b(Compatibility\s+(List|Document|Matrix|Chart|Guide))\b'
-
-  # --- Network guide ---
+    pattern: \b(Compatibility\s+(List|Document|Matrix|Chart|Guide))\b
   - id: network_guide_first_page
     document_type: network_guide
     confidence: high
     match: first_page
-    pattern: '\b(Network\s+(Guide|Manual|Setup|Configuration))\b'
-
-  # --- Reference guide ---
+    pattern: \b(Network\s+(Guide|Manual|Setup|Configuration))\b
   - id: reference_guide_first_page
     document_type: reference_guide
     confidence: high
     match: first_page
-    pattern: '\b(Reference\s+(Guide|Manual)|Quick\s+Reference)\b'
-
-  # --- Training material ---
+    pattern: \b(Reference\s+(Guide|Manual)|Quick\s+Reference)\b
   - id: training_first_page
     document_type: training
     confidence: high
     match: first_page
-    pattern: '\b(Training\s+(Manual|Workbook|Course|Guide)|Certification\s+Course|Student\s+Workbook)\b'
-
-  # --- Inspection report ---
+    pattern: \b(Training\s+(Manual|Workbook|Course|Guide)|Certification\s+Course|Student\s+Workbook)\b
   - id: inspection_report_first_page
     document_type: inspection_report
     confidence: high
     match: first_page
-    pattern: '\b(Inspection\s+Report|Annual\s+Inspection|Fire\s+Alarm\s+Inspection)\b'
+    pattern: \b(Inspection\s+Report|Annual\s+Inspection|Fire\s+Alarm\s+Inspection)\b
+    source_data_type: Any
   - id: inspection_report_body
     document_type: inspection_report
     confidence: medium
     match: extract
-    pattern: '\b(date\s+of\s+inspection|deficiencies\s+noted|inspector\s+signature|owner\s+acknowledgement)\b'
-
-  # --- Program sheet (fill-in worksheets) ---
+    pattern: \b(date\s+of\s+inspection|deficiencies\s+noted|inspector\s+signature|owner\s+acknowledgement)\b
+    source_data_type: Any
   - id: program_sheet_body
     document_type: program_sheet
     confidence: high
     match: extract
-    pattern: '\b(Zone\s*0?[1-9]\s*[:#]|Partition\s*[12]\s*[:#]|User\s+Code\s*[:#]|Master\s+Code\s*[:#])\b'
-
-  # --- Drawings / schematics ---
+    pattern: \b(Zone\s*0?[1-9]\s*[:#]|Partition\s*[12]\s*[:#]|User\s+Code\s*[:#]|Master\s+Code\s*[:#])\b
   - id: drawing_first_page
     document_type: drawing
     confidence: medium
     match: first_page
-    pattern: '\b(Riser\s+Diagram|Floor\s+Plan|Panel\s+Layout|Wiring\s+Schematic|Single\s+Line\s+Diagram)\b'
-
-  # --- Contract / commercial ---
+    pattern: \b(Riser\s+Diagram|Floor\s+Plan|Panel\s+Layout|Wiring\s+Schematic|Single\s+Line\s+Diagram)\b
+    source_data_type: Any
   - id: contract_first_page
     document_type: contract
     confidence: high
     match: first_page
-    pattern: '\b(Service\s+Agreement|Maintenance\s+Agreement|Scope\s+of\s+Work|Master\s+Services?\s+Agreement)\b'
+    pattern: \b(Service\s+Agreement|Maintenance\s+Agreement|Scope\s+of\s+Work|Master\s+Services?\s+Agreement)\b
+    source_data_type: Any
   - id: estimate_first_page
     document_type: estimate
     confidence: high
     match: first_page
-    pattern: '\b(Cost\s+Estimate|Project\s+Estimate|Bid\s+Proposal|Quote\s*#)\b'
-
-  # --- Design document ---
+    pattern: \b(Cost\s+Estimate|Project\s+Estimate|Bid\s+Proposal|Quote\s*#)\b
   - id: design_doc_first_page
     document_type: design_document
     confidence: high
     match: first_page
-    pattern: '\b(Design\s+(Narrative|Document|Package)|Battery\s+Calculation|Voltage\s+Drop\s+Calculation)\b'
-
-  # --- Addendum ---
+    pattern: \b(Design\s+(Narrative|Document|Package)|Battery\s+Calculation|Voltage\s+Drop\s+Calculation)\b
+    source_data_type: Any
   - id: addendum_first_page
     document_type: addendum
     confidence: high
     match: first_page
-    pattern: '\b(Addendum|Replacement\s+Pages?|Supplement\s+to|This\s+document\s+supersedes)\b'
-
-  # --- Service / field record ---
+    pattern: \b(Addendum|Replacement\s+Pages?|Supplement\s+to|This\s+document\s+supersedes)\b
   - id: service_record_body
     document_type: service_record
     confidence: medium
     match: extract
-    pattern: '\b(Service\s+Call|Trouble\s+Ticket|Repair\s+Order|Service\s+Visit\s+Report)\b'
+    pattern: \b(Service\s+Call|Trouble\s+Ticket|Repair\s+Order|Service\s+Visit\s+Report)\b
+    source_data_type: Any
+
+  # --- JobFiles content rules (per-job operational records) -----------
+  # First-page rules anchor on the title/header tokens that almost always
+  # appear in the first ~600 chars of these document types. Body rules
+  # catch documents whose title page is generic (logo + customer name)
+  # but whose body uses unmistakable phrasing.
+
+  - id: jf_proposal_first_page
+    document_type: proposal
+    confidence: high
+    match: first_page
+    pattern: \b(Proposal|Project\s+Proposal|Sales\s+Proposal|Scope\s+of\s+Work\s+Proposal)\b
+    source_data_type: JobFiles
+  - id: jf_proposal_body
+    document_type: proposal
+    confidence: medium
+    match: extract
+    pattern: \b(We\s+are\s+pleased\s+to\s+(submit|propose|offer)|This\s+proposal\s+is\s+valid|Proposal\s+is\s+valid\s+for\s+\d+\s+days)\b
+    source_data_type: JobFiles
+
+  - id: jf_quote_first_page
+    document_type: quote
+    confidence: high
+    match: first_page
+    pattern: \b(Quote|Quotation|Price\s+Quote|Sales\s+Quote|Quote\s+(Number|No\.?|#))\b
+    source_data_type: JobFiles
+  - id: jf_quote_body
+    document_type: quote
+    confidence: medium
+    match: extract
+    pattern: \b(Quote\s+is\s+valid|Quotation\s+is\s+valid|Pricing\s+valid\s+for|Total\s+Quoted\s+Price)\b
+    source_data_type: JobFiles
+
+  - id: jf_estimate_first_page
+    document_type: estimate
+    confidence: high
+    match: first_page
+    pattern: \b(Project\s+Estimate|Cost\s+Estimate|Construction\s+Estimate|Estimate\s+Summary|Bid\s+Estimate)\b
+    source_data_type: JobFiles
+
+  - id: jf_bid_workup_first_page
+    document_type: bid_workup
+    confidence: medium
+    match: first_page
+    pattern: \b(Bid\s+Worksheet|Bid\s+Workup|Takeoff|Material\s+Takeoff|Labor\s+Worksheet|Cost\s+Analysis)\b
+    source_data_type: JobFiles
+
+  - id: jf_sales_order_first_page
+    document_type: sales_order
+    confidence: high
+    match: first_page
+    pattern: \b(Sales\s+Order(\s+(Number|No\.?|#))?|Order\s+Acknowledgment|Order\s+Confirmation)\b
+    source_data_type: JobFiles
+
+  - id: jf_purchase_order_first_page
+    document_type: purchase_order
+    confidence: high
+    match: first_page
+    pattern: \b(Purchase\s+Order(\s+(Number|No\.?|#))?|P\.?O\.?\s*(Number|No\.?|#))\b
+    source_data_type: JobFiles
+
+  - id: jf_letter_of_intent_first_page
+    document_type: letter_of_intent
+    confidence: high
+    match: first_page
+    pattern: \b(Letter\s+of\s+Intent|LOI)\b
+    source_data_type: JobFiles
+  - id: jf_letter_of_intent_body
+    document_type: letter_of_intent
+    confidence: medium
+    match: extract
+    pattern: \b(this\s+letter\s+of\s+intent|intent\s+to\s+(award|enter\s+into)|the\s+parties\s+intend\s+to)\b
+    source_data_type: JobFiles
+
+  - id: jf_ntp_first_page
+    document_type: notice_to_proceed
+    confidence: high
+    match: first_page
+    pattern: \b(Notice\s+to\s+Proceed|NTP)\b
+    source_data_type: JobFiles
+  - id: jf_ntp_body
+    document_type: notice_to_proceed
+    confidence: medium
+    match: extract
+    pattern: \b(authorized\s+to\s+(proceed|commence)|you\s+are\s+hereby\s+(authorized|directed)\s+to\s+(proceed|begin)|notice\s+to\s+proceed\s+is\s+(hereby\s+)?(given|issued))\b
+    source_data_type: JobFiles
+
+  - id: jf_install_record_first_page
+    document_type: installation_record
+    confidence: high
+    match: first_page
+    pattern: \b(Record\s+of\s+Completion|Certificate\s+of\s+Completion|NFPA\s*72|Inspection\s+Card|Acceptance\s+Test\s+Record)\b
+    source_data_type: JobFiles
+  - id: jf_install_record_body
+    document_type: installation_record
+    confidence: medium
+    match: extract
+    pattern: \b(installer\s+sign(\s*-?\s*)?off|system\s+(turnover|acceptance)|Final\s+Inspection\s+Report|Acceptance\s+Test\s+Procedure)\b
+    source_data_type: JobFiles
+
+  - id: jf_permit_first_page
+    document_type: permit
+    confidence: high
+    match: first_page
+    pattern: \b(Building\s+Permit|Fire\s+Permit|Electrical\s+Permit|Permit\s+Application|Plan\s+Check)\b
+    source_data_type: JobFiles
+  - id: jf_permit_body
+    document_type: permit
+    confidence: medium
+    match: extract
+    pattern: \b(Authority\s+Having\s+Jurisdiction|AHJ|permit\s+(number|no\.?|#)\s+\w+|permit\s+is\s+(hereby\s+)?(issued|granted))\b
+    source_data_type: JobFiles
+
+  - id: jf_warranty_cert_first_page
+    document_type: warranty_nfpa_cert
+    confidence: high
+    match: first_page
+    pattern: \b(Certificate\s+of\s+Compliance|Warranty\s+Certificate|Inspection\s+(and|&)\s+Testing\s+Report|NFPA\s+(Cert|Certification|Compliance))\b
+    source_data_type: JobFiles
+  - id: jf_warranty_body
+    document_type: warranty_nfpa_cert
+    confidence: medium
+    match: extract
+    pattern: \b(warranty\s+period|warranted\s+(against|for)|this\s+(unit|system|product)\s+is\s+warranted|installation\s+meets\s+the\s+requirements\s+of\s+NFPA)\b
+    source_data_type: JobFiles
+
+  - id: jf_rfc_first_page
+    document_type: rfc
+    confidence: high
+    match: first_page
+    pattern: \b(Request\s+for\s+(Change|Information|Proposal)|RFC|RFI|Change\s+Order|Change\s+Request)\b
+    source_data_type: JobFiles
+  - id: jf_rfc_body
+    document_type: rfc
+    confidence: medium
+    match: extract
+    pattern: \b(Change\s+Order\s+(Number|No\.?|#)|RFI\s+(Number|No\.?|#)|original\s+contract\s+(amount|sum)|revised\s+contract\s+(amount|sum)|net\s+change\s+by\s+(previous|prior))\b
+    source_data_type: JobFiles
+
+  - id: jf_lien_release_first_page
+    document_type: lien_release
+    confidence: high
+    match: first_page
+    pattern: \b(Lien\s+(Release|Waiver)|Conditional\s+Waiver|Unconditional\s+Waiver|Preliminary\s+Notice|Mechanic'?s?\s+Lien)\b
+    source_data_type: JobFiles
+  - id: jf_lien_release_body
+    document_type: lien_release
+    confidence: medium
+    match: extract
+    pattern: \b(waives\s+(any\s+and\s+)?all\s+(rights|claims)\s+to|release(s)?\s+(any\s+and\s+)?all\s+(liens|claims)|conditional\s+(release|waiver)\s+(of|on)\s+(progress|final)|upon\s+(progress|final)\s+payment)\b
+    source_data_type: JobFiles
+
+  - id: jf_invoice_first_page
+    document_type: invoice
+    confidence: high
+    match: first_page
+    pattern: \b(Invoice|Invoice\s+(Number|No\.?|#)|Application\s+for\s+Payment|Bill\s+To)\b
+    source_data_type: JobFiles
+  - id: jf_invoice_body
+    document_type: invoice
+    confidence: medium
+    match: extract
+    pattern: \b(Total\s+(Due|Amount\s+Due|Amount\s+Owed)|Payment\s+Terms|Net\s+\d+\s+days|Remit\s+Payment\s+to|Past\s+Due\s+Amount)\b
+    source_data_type: JobFiles
+
+  - id: jf_subcontract_first_page
+    document_type: subcontract
+    confidence: high
+    match: first_page
+    pattern: \b(Subcontract\s+Agreement|Subcontractor\s+Agreement|Standard\s+Form\s+of\s+Agreement\s+Between\s+Contractor\s+and\s+Subcontractor)\b
+    source_data_type: JobFiles
+  - id: jf_subcontract_body
+    document_type: subcontract
+    confidence: medium
+    match: extract
+    pattern: \b(this\s+subcontract|the\s+subcontractor\s+(shall|agrees|will)|subcontract\s+(sum|amount|price)|prime\s+contract\s+between)\b
+    source_data_type: JobFiles
+
+  - id: jf_materials_list_first_page
+    document_type: materials_list
+    confidence: high
+    match: first_page
+    pattern: \b(Bill\s+of\s+Materials|Materials\s+(List|Schedule)|Equipment\s+List|Equipment\s+Schedule|BOM)\b
+    source_data_type: JobFiles
+
+  - id: jf_insurance_first_page
+    document_type: insurance_doc
+    confidence: high
+    match: first_page
+    pattern: \b(Certificate\s+of\s+(Liability\s+)?Insurance|ACORD|COI)\b
+    source_data_type: JobFiles
+  - id: jf_insurance_body
+    document_type: insurance_doc
+    confidence: medium
+    match: extract
+    pattern: \b(General\s+Aggregate|Each\s+Occurrence|Workers'?\s+Compensation|Commercial\s+General\s+Liability|Insurer\s+(Letter|Affording\s+Coverage))\b
+    source_data_type: JobFiles
+
+  - id: jf_affidavit_first_page
+    document_type: affidavit
+    confidence: high
+    match: first_page
+    pattern: \b(Affidavit|Sworn\s+Statement|Apprenticeship\s+(Certification|Affidavit)|Statutory\s+Declaration)\b
+    source_data_type: JobFiles
+  - id: jf_affidavit_body
+    document_type: affidavit
+    confidence: medium
+    match: extract
+    pattern: \b(being\s+(first\s+)?duly\s+sworn|on\s+oath\s+depose|subscribed\s+and\s+sworn\s+(to\s+)?before\s+me|notary\s+public)\b
+    source_data_type: JobFiles
+
+  - id: jf_panel_program_body
+    document_type: panel_program
+    confidence: medium
+    match: extract
+    pattern: \b(Programmer\s+Version|Site\s+Database|Job\s+Database|Account\s+Number\s*[:=]\s*\d+|Site\s+Code\s*[:=])\b
+    source_data_type: JobFiles
+

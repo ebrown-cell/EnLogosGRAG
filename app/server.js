@@ -9,19 +9,24 @@ import { fileURLToPath } from "node:url";
 import { openDb } from "./db.js";
 import { readListing, ingestVendors, ingestFiles } from "./listing.js";
 import {
-  classifyAll, classifyAllByContent, classifyAllByProduct,
+  classifyAll, classifyAllByContent, classifyAllByProduct, classifyAllByVendor,
   readFilenameRules, readContentRulesRaw, readProductRulesRaw,
+  readVendorRulesRaw, readBuildingExtractorRulesRaw,
   writeFilenameRules, writeContentRules, writeProductRules,
+  writeVendorRules, writeBuildingExtractorRules,
   CLASSIFIER_KINDS,
 } from "./classifier.js";
 import * as extractor from "./extractor.js";
 import * as hasher from "./hasher.js";
+import * as buildingsMatcher from "./buildings_matcher.js";
+import { snapshotBuildings, snapshotBuildingAddresses, seedPyrocommIgnored } from "./buildings_loader.js";
 
 // The extractor and hasher both translate canonical S:\ paths to local
 // paths using the same remap table the open-file feature uses. Wire that
 // up once at module load.
 extractor.setPathRemapper(remapPath);
 hasher.setPathRemapper(remapPath);
+buildingsMatcher.setPathRemapper(remapPath);
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 // Repo root sits one level above app/. Used to resolve siblings like
@@ -34,7 +39,7 @@ const PORT = Number(process.env.PORT) || 8780;
 const DEFAULT_SOURCE = "C:\\data\\PyroCommData";
 const DEFAULT_LISTING_NAME = "basic_listing.txt";
 
-const TABLES = ["vendors", "document_types", "files", "documents", "document_extracts", "products", "document_products"];
+const TABLES = ["vendors", "document_types", "files", "documents", "document_extracts", "products", "document_products", "canonical_buildings", "buildings", "building_addresses", "document_buildings", "ignored_buildings"];
 
 // Prefix remap for opening files. The listing in the DB uses canonical
 // share paths (S:\vendors\...) generated on a different machine. Locally,
@@ -81,13 +86,18 @@ function resolveListingPath(source) {
 
 function tableCounts(db) {
   return {
-    vendors:           db.prepare("SELECT COUNT(*) AS n FROM vendors").get().n,
-    document_types:    db.prepare("SELECT COUNT(*) AS n FROM document_types").get().n,
-    files:             db.prepare("SELECT COUNT(*) AS n FROM files").get().n,
-    documents:         db.prepare("SELECT COUNT(*) AS n FROM documents").get().n,
-    document_extracts: db.prepare("SELECT COUNT(*) AS n FROM document_extracts").get().n,
-    products:          db.prepare("SELECT COUNT(*) AS n FROM products").get().n,
-    document_products: db.prepare("SELECT COUNT(*) AS n FROM document_products").get().n,
+    vendors:             db.prepare("SELECT COUNT(*) AS n FROM vendors").get().n,
+    document_types:      db.prepare("SELECT COUNT(*) AS n FROM document_types").get().n,
+    files:               db.prepare("SELECT COUNT(*) AS n FROM files").get().n,
+    documents:           db.prepare("SELECT COUNT(*) AS n FROM documents").get().n,
+    document_extracts:   db.prepare("SELECT COUNT(*) AS n FROM document_extracts").get().n,
+    products:            db.prepare("SELECT COUNT(*) AS n FROM products").get().n,
+    document_products:   db.prepare("SELECT COUNT(*) AS n FROM document_products").get().n,
+    canonical_buildings: db.prepare("SELECT COUNT(*) AS n FROM canonical_buildings").get().n,
+    buildings:           db.prepare("SELECT COUNT(*) AS n FROM buildings").get().n,
+    building_addresses:  db.prepare("SELECT COUNT(*) AS n FROM building_addresses").get().n,
+    document_buildings:  db.prepare("SELECT COUNT(*) AS n FROM document_buildings").get().n,
+    ignored_buildings:   db.prepare("SELECT COUNT(*) AS n FROM ignored_buildings").get().n,
   };
 }
 
@@ -241,6 +251,61 @@ const SORT_KEYS = {
     confidence:    "dp.confidence",
     source:        "dp.source",
   },
+  // canonical_buildings: read-only Snowflake mirror, sortable on the
+  // useful canonical columns. (Was previously named "buildings".)
+  canonical_buildings: {
+    building_uid:      "building_uid",
+    canonical_address: "canonical_address",
+    canonical_city:    "canonical_city",
+    canonical_state:   "canonical_state",
+    canonical_zip:     "canonical_zip",
+    total_activity:    "total_activity",
+    name_count:        "name_count",
+    suite_count:       "suite_count",
+    data_quality:      "data_quality",
+  },
+  // buildings: extracted-from-documents references. The interesting
+  // sort axes are dedup/identification columns + the doc-link count.
+  buildings: {
+    id:               "id",
+    canonical_uid:    "canonical_uid",
+    raw_name:         "raw_name",
+    raw_address:      "raw_address",
+    raw_city:         "raw_city",
+    raw_state:        "raw_state",
+    match_confidence: "match_confidence",
+    match_source:     "match_source",
+    first_seen_at:    "first_seen_at",
+    last_seen_at:     "last_seen_at",
+  },
+  building_addresses: {
+    xref_id:           "xref_id",
+    building_uid:      "building_uid",
+    canonical_address: "canonical_address",
+    raw_address:       "raw_address",
+    raw_city:          "raw_city",
+    raw_state:         "raw_state",
+    source_system:     "source_system",
+  },
+  document_buildings: {
+    document_id:    "db.document_id",
+    document_name:  "document_name",
+    building_id:    "db.building_id",
+    raw_name:       "b.raw_name",
+    raw_address:    "b.raw_address",
+    confidence:     "db.confidence",
+    source:         "db.source",
+  },
+  ignored_buildings: {
+    building_uid:      "ib.building_uid",
+    canonical_address: "cb.canonical_address",
+    canonical_city:    "cb.canonical_city",
+    canonical_state:   "cb.canonical_state",
+    canonical_zip:     "cb.canonical_zip",
+    total_activity:    "cb.total_activity",
+    notes:             "ib.notes",
+    added_at:          "ib.added_at",
+  },
 };
 
 // Resolves a (table, sortColumn, sortDir) request into a safe ORDER BY
@@ -285,6 +350,9 @@ function handleBrowse(body) {
         documentTypeFilters: Array.isArray(body.documentTypeFilters) ? body.documentTypeFilters : [],
         productFilter: body.productFilter || "",
         hasProductFilter: body.hasProductFilter || "",
+        sdtFilter: body.sdtFilter || "",
+        buildingFilter: body.buildingFilter || "",
+        hasBuildingFilter: body.hasBuildingFilter || "",
         sortColumn, sortDir,
       });
     }
@@ -296,6 +364,18 @@ function handleBrowse(body) {
     }
     if (table === "document_products") {
       return browseDocumentProducts(db, { limit, offset, filter, sortColumn, sortDir });
+    }
+    if (table === "canonical_buildings") {
+      return browseCanonicalBuildings(db, { limit, offset, filter, sortColumn, sortDir });
+    }
+    if (table === "buildings") {
+      return browseBuildings(db, { limit, offset, filter, sortColumn, sortDir });
+    }
+    if (table === "document_buildings") {
+      return browseDocumentBuildings(db, { limit, offset, filter, sortColumn, sortDir });
+    }
+    if (table === "ignored_buildings") {
+      return browseIgnoredBuildings(db, { limit, offset, filter, sortColumn, sortDir });
     }
 
     const clauses = [];
@@ -312,6 +392,13 @@ function handleBrowse(body) {
         clauses.push("(path LIKE ? OR name LIKE ?)");
         args.push(`%${filter}%`, `%${filter}%`);
       }
+    }
+    // Source-data-type filter on document_types. Mirrors the editor
+    // convention: 'Vendor' shows Vendor + Any types; 'JobFiles' shows
+    // JobFiles + Any; 'Any' shows everything (no filter applied).
+    if (table === "document_types" && body.sourceDataTypeFilter && body.sourceDataTypeFilter !== "Any") {
+      clauses.push("(source_data_type = ? OR source_data_type = 'Any')");
+      args.push(body.sourceDataTypeFilter);
     }
     if (table === "files" && Array.isArray(body.fileTypeFilters) && body.fileTypeFilters.length) {
       const placeholders = body.fileTypeFilters.map(() => "?").join(",");
@@ -339,9 +426,21 @@ function handleBrowse(body) {
       .get(...args);
     const total = totalRow.n;
 
-    // Default order: PK ASC. Caller's sortColumn/sortDir overrides via
-    // the SORT_KEYS allowlist so an unknown column name can't slip into SQL.
-    const orderBy = resolveOrderBy(table, sortColumn, sortDir, "ORDER BY id ASC");
+    // Default order: PK ASC. Most ephemeral tables have an integer `id`
+    // PK; a few canonical/ignored tables don't (their PK is a string
+    // like building_uid or path). Pick a sensible default per table so
+    // the generic browse query doesn't error out with "no such column: id".
+    const DEFAULT_ORDER = {
+      ignored_buildings:  "ORDER BY added_at DESC",
+      ignored_files:      "ORDER BY added_at DESC",
+      ignored_folders:    "ORDER BY added_at DESC",
+      ignored_file_types: "ORDER BY added_at DESC",
+      canonical_buildings:"ORDER BY building_uid ASC",
+      building_addresses: "ORDER BY xref_id ASC",
+      document_types:     "ORDER BY id ASC",
+    };
+    const fallbackOrder = DEFAULT_ORDER[table] || "ORDER BY id ASC";
+    const orderBy = resolveOrderBy(table, sortColumn, sortDir, fallbackOrder);
     const rows = db
       .prepare(`SELECT * FROM ${table} ${where} ${orderBy} LIMIT ? OFFSET ?`)
       .all(...args, limit, offset);
@@ -361,9 +460,9 @@ function handleBrowse(body) {
 //   "low"    keeps low/medium/high (and excludes unclassified)
 //   "medium" keeps medium/high
 //   "high"   keeps high only
-function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter, sortColumn, sortDir }) {
+function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter, sdtFilter, buildingFilter, hasBuildingFilter, sortColumn, sortDir }) {
   const { from, where, args } = buildDocumentsWhere({
-    filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter,
+    filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter, sdtFilter, buildingFilter, hasBuildingFilter,
   });
   const total = db
     .prepare(`SELECT COUNT(*) AS n ${from} ${where}`)
@@ -390,6 +489,7 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
               END             AS document_name,
               v.name          AS vendor_name,
               dt.name         AS document_type,
+              dt.description  AS document_type_description,
               d.confidence    AS confidence,
               f.file_type     AS file_type,
               CASE
@@ -405,6 +505,8 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
     )
     .all(...args, limit, offset);
 
+  // 'extract' is intentionally NOT in this list — it's used by the per-row
+  // action menu (View Extract enabled-state), not as a visible column.
   const columns = [
     "id",
     "document_name",
@@ -412,7 +514,6 @@ function browseDocuments(db, { limit, offset, filter, classifiedFilter, minConfi
     "document_type",
     "confidence",
     "file_type",
-    "extract",
     "sha256",
     "file_path",
   ];
@@ -537,6 +638,198 @@ function browseDocumentProducts(db, { limit, offset, filter, sortColumn, sortDir
   return { ok: true, total, limit, offset, filter, columns, rows };
 }
 
+// Canonical buildings browse — read-only mirror of Kent's BUILDING_CANONICAL.
+// Joins in a doc-link count via the *new* buildings → document_buildings
+// chain so the row is still useful at a glance.
+function browseCanonicalBuildings(db, { limit, offset, filter, sortColumn, sortDir }) {
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = `WHERE (canonical_address LIKE ? OR canonical_city LIKE ?
+                   OR (names_sample IS NOT NULL AND names_sample LIKE ?)
+                   OR building_uid LIKE ?)`;
+    const like = `%${filter}%`;
+    args.push(like, like, like, like);
+  }
+  const total = db.prepare(
+    "SELECT COUNT(*) AS n FROM canonical_buildings " + where,
+  ).get(...args).n;
+
+  const rows = db.prepare(
+    `SELECT cb.building_uid       AS building_uid,
+            cb.canonical_address  AS canonical_address,
+            cb.canonical_city     AS canonical_city,
+            cb.canonical_state    AS canonical_state,
+            cb.canonical_zip      AS canonical_zip,
+            cb.total_activity     AS total_activity,
+            cb.name_count         AS name_count,
+            cb.suite_count        AS suite_count,
+            cb.data_quality       AS data_quality,
+            (SELECT COUNT(*) FROM document_buildings db
+                JOIN buildings b ON b.id = db.building_id
+              WHERE b.canonical_uid = cb.building_uid) AS doc_count,
+            cb.names_sample       AS names_sample
+     FROM canonical_buildings cb
+     ${where}
+     ${resolveOrderBy("canonical_buildings", sortColumn, sortDir, "ORDER BY total_activity DESC, canonical_address")}
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = [
+    "building_uid", "canonical_address", "canonical_city", "canonical_state",
+    "canonical_zip", "doc_count", "total_activity", "name_count",
+    "suite_count", "data_quality", "names_sample",
+  ];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
+// Buildings browse — extracted-from-documents references. Each row is
+// one observed building (deduped by canonical_uid or by raw form). Joins
+// in the doc-link count and the canonical_address (for matched rows).
+function browseBuildings(db, { limit, offset, filter, sortColumn, sortDir }) {
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = `WHERE (b.raw_name LIKE ? OR b.raw_address LIKE ? OR b.raw_city LIKE ?
+                   OR b.canonical_uid LIKE ?
+                   OR EXISTS (
+                     SELECT 1 FROM canonical_buildings cb
+                      WHERE cb.building_uid = b.canonical_uid
+                        AND (cb.canonical_address LIKE ? OR cb.names_sample LIKE ?)
+                   ))`;
+    const like = `%${filter}%`;
+    args.push(like, like, like, like, like, like);
+  }
+  const total = db.prepare(
+    "SELECT COUNT(*) AS n FROM buildings b " + where,
+  ).get(...args).n;
+
+  const rows = db.prepare(
+    `SELECT b.id                 AS id,
+            b.canonical_uid      AS canonical_uid,
+            b.raw_name           AS raw_name,
+            b.raw_address        AS raw_address,
+            b.raw_city           AS raw_city,
+            b.raw_state          AS raw_state,
+            b.match_confidence   AS match_confidence,
+            b.match_source       AS match_source,
+            b.first_seen_at      AS first_seen_at,
+            b.last_seen_at       AS last_seen_at,
+            (SELECT COUNT(*) FROM document_buildings db
+              WHERE db.building_id = b.id) AS doc_count,
+            cb.canonical_address AS canonical_address
+     FROM buildings b
+     LEFT JOIN canonical_buildings cb ON cb.building_uid = b.canonical_uid
+     ${where}
+     ${resolveOrderBy("buildings", sortColumn, sortDir, "ORDER BY b.last_seen_at DESC, b.id")}
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = [
+    "id", "canonical_uid", "raw_name", "canonical_address",
+    "raw_address", "raw_city", "raw_state",
+    "match_confidence", "match_source", "doc_count",
+    "first_seen_at", "last_seen_at",
+  ];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
+// document_buildings browse — joins through documents/files + buildings
+// + canonical_buildings to expose the full provenance for each link.
+function browseDocumentBuildings(db, { limit, offset, filter, sortColumn, sortDir }) {
+  const FROM = `
+    FROM document_buildings db
+    JOIN documents d                 ON d.id = db.document_id
+    JOIN files f                     ON f.id = d.file_id
+    JOIN buildings b                 ON b.id = db.building_id
+    LEFT JOIN canonical_buildings cb ON cb.building_uid = b.canonical_uid
+  `;
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = `WHERE f.name LIKE ? OR f.path LIKE ?
+                  OR (b.raw_name IS NOT NULL AND b.raw_name LIKE ?)
+                  OR (b.raw_address IS NOT NULL AND b.raw_address LIKE ?)
+                  OR (cb.canonical_address IS NOT NULL AND cb.canonical_address LIKE ?)
+                  OR (db.source IS NOT NULL AND db.source LIKE ?)`;
+    const like = `%${filter}%`;
+    args.push(like, like, like, like, like, like);
+  }
+  const total = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${where}`).get(...args).n;
+
+  const rows = db.prepare(
+    `SELECT db.document_id      AS document_id,
+            CASE
+              WHEN f.file_type IS NOT NULL
+                AND length(f.name) > length(f.file_type)
+                AND lower(substr(f.name, length(f.name) - length(f.file_type) + 1)) = f.file_type
+              THEN substr(f.name, 1, length(f.name) - length(f.file_type))
+              ELSE f.name
+            END                  AS document_name,
+            db.building_id       AS building_id,
+            b.raw_name           AS raw_name,
+            COALESCE(cb.canonical_address, b.raw_address) AS raw_address,
+            db.confidence        AS confidence,
+            db.source            AS source,
+            db.matched_token     AS matched_token,
+            f.path               AS file_path
+     ${FROM} ${where}
+     ${resolveOrderBy("document_buildings", sortColumn, sortDir, "ORDER BY db.document_id, b.id")}
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = [
+    "document_id", "document_name", "building_id", "raw_name", "raw_address",
+    "confidence", "source", "matched_token", "file_path",
+  ];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
+// Ignored buildings browse — joins with canonical_buildings so each row
+// shows the address + sample names + activity level alongside the user's
+// note. Without the join the view is just opaque UIDs.
+function browseIgnoredBuildings(db, { limit, offset, filter, sortColumn, sortDir }) {
+  const FROM = `
+    FROM ignored_buildings ib
+    LEFT JOIN canonical_buildings cb ON cb.building_uid = ib.building_uid
+  `;
+  let where = "";
+  const args = [];
+  if (filter) {
+    where = `WHERE ib.building_uid LIKE ?
+                  OR (ib.notes IS NOT NULL AND ib.notes LIKE ?)
+                  OR (cb.canonical_address IS NOT NULL AND cb.canonical_address LIKE ?)
+                  OR (cb.canonical_city IS NOT NULL AND cb.canonical_city LIKE ?)
+                  OR (cb.names_sample IS NOT NULL AND cb.names_sample LIKE ?)`;
+    const like = `%${filter}%`;
+    args.push(like, like, like, like, like);
+  }
+  const total = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${where}`).get(...args).n;
+
+  // Default order: most recently added first. Caller's sort wins via
+  // SORT_KEYS — see below.
+  const rows = db.prepare(
+    `SELECT ib.building_uid       AS building_uid,
+            ib.added_at           AS added_at,
+            ib.notes              AS notes,
+            cb.canonical_address  AS canonical_address,
+            cb.canonical_city     AS canonical_city,
+            cb.canonical_state    AS canonical_state,
+            cb.canonical_zip      AS canonical_zip,
+            cb.total_activity     AS total_activity,
+            cb.names_sample       AS names_sample
+     ${FROM} ${where}
+     ${resolveOrderBy("ignored_buildings", sortColumn, sortDir, "ORDER BY ib.added_at DESC")}
+     LIMIT ? OFFSET ?`,
+  ).all(...args, limit, offset);
+
+  const columns = [
+    "building_uid", "canonical_address", "canonical_city", "canonical_state",
+    "canonical_zip", "total_activity", "notes", "added_at", "names_sample",
+  ];
+  return { ok: true, total, limit, offset, filter, columns, rows };
+}
+
 // Single-extract fetch for the modal viewer. Returns text + metadata +
 // page count + the joined file info, but not pages_json (huge — leave
 // for future structured viewer).
@@ -581,11 +874,11 @@ function confidenceTiersAtOrAbove(threshold) {
 
 // Builds the FROM/WHERE/args triple shared by browseDocuments and handleStats.
 // Both endpoints filter the same way; only the SELECT and aggregation differ.
-function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter }) {
+function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactConfidence, fileTypeFilters, documentTypeFilters, productFilter, hasProductFilter, sdtFilter, buildingFilter, hasBuildingFilter }) {
   const from = `
     FROM documents d
     JOIN files f          ON f.id = d.file_id
-    JOIN vendors v        ON v.id = f.vendor_id
+    LEFT JOIN vendors v   ON v.id = d.vendor_id
     LEFT JOIN document_types dt ON dt.id = d.document_type_id
   `;
   const clauses = [];
@@ -607,6 +900,16 @@ function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactCon
     const placeholders = fileTypeFilters.map(() => "?").join(",");
     clauses.push(`f.file_type IN (${placeholders})`);
     args.push(...fileTypeFilters);
+  }
+  // SDT filter on the underlying file's source_data_type. '(none)' matches
+  // legacy rows where the column wasn't stamped.
+  if (sdtFilter) {
+    if (sdtFilter === "(none)") {
+      clauses.push("(f.source_data_type IS NULL OR f.source_data_type = '')");
+    } else {
+      clauses.push("f.source_data_type = ?");
+      args.push(sdtFilter);
+    }
   }
   if (Array.isArray(documentTypeFilters) && documentTypeFilters.length) {
     // dt.name is unique on document_types (the schema enforces it).
@@ -643,6 +946,21 @@ function buildDocumentsWhere({ filter, classifiedFilter, minConfidence, exactCon
   } else if (hasProductFilter === "no") {
     clauses.push("NOT EXISTS (SELECT 1 FROM document_products dp_f WHERE dp_f.document_id = d.id)");
   }
+  // Building link membership. buildingFilter narrows to documents linked
+  // to that specific buildings.id; hasBuildingFilter narrows to docs
+  // with at least one (or zero) building links.
+  if (buildingFilter) {
+    clauses.push(
+      "EXISTS (SELECT 1 FROM document_buildings db_f " +
+      "WHERE db_f.document_id = d.id AND db_f.building_id = ?)",
+    );
+    args.push(buildingFilter);
+  }
+  if (hasBuildingFilter === "yes") {
+    clauses.push("EXISTS (SELECT 1 FROM document_buildings db_f WHERE db_f.document_id = d.id)");
+  } else if (hasBuildingFilter === "no") {
+    clauses.push("NOT EXISTS (SELECT 1 FROM document_buildings db_f WHERE db_f.document_id = d.id)");
+  }
   const where = clauses.length ? "WHERE " + clauses.join(" AND ") : "";
   return { from, where, args };
 }
@@ -659,6 +977,10 @@ function handleIngest(body, which) {
   // useIgnores defaults to true when absent — matches old behavior for any
   // caller that hasn't been updated yet.
   const applyIgnores = body.useIgnores !== false;
+  // sourceDataType: scope-of-wipe for files-ingest. The two corpora share
+  // a single DB but each ingest only refreshes ITS OWN SDT's rows. Caller
+  // (the UI) passes state.activeSdt; falls back to 'Vendor' for legacy.
+  const sourceDataType = body.sourceDataType || "Vendor";
   const listing = resolveListingPath(source);
   if (!listing) {
     return {
@@ -666,6 +988,14 @@ function handleIngest(body, which) {
       error: `No listing file found for source: ${source || "(empty)"}`,
     };
   }
+  // Corpus root for cache routing: the chosen folder. If `source` is a
+  // listing.txt, use its dirname.
+  let corpusRoot = source;
+  try {
+    const st = fs.statSync(source);
+    if (st.isFile()) corpusRoot = path.dirname(source);
+  } catch { /* fall through with raw source */ }
+
   const db = openDb();
   try {
     const paths = readListing(listing);
@@ -674,12 +1004,12 @@ function handleIngest(body, which) {
       return { ok: true, action: "vendors", listing, ...r, counts: tableCounts(db) };
     }
     if (which === "files") {
-      const r = ingestFiles(db, paths, { applyIgnores });
+      const r = ingestFiles(db, paths, { applyIgnores, sourceDataType, corpusRoot });
       return { ok: true, action: "files", listing, ...r, counts: tableCounts(db) };
     }
     if (which === "full") {
       const v = ingestVendors(db, paths);
-      const f = ingestFiles(db, paths, { applyIgnores });
+      const f = ingestFiles(db, paths, { applyIgnores, sourceDataType, corpusRoot });
       return {
         ok: true,
         action: "full",
@@ -807,37 +1137,82 @@ function normalizeFolderName(raw) {
 // Three YAML rule files (filename / content / product) are editable from
 // the UI. GET returns the parsed rule list; POST validates + writes back.
 
+// Each classifier "kind" maps to one YAML file. Split kinds (e.g.
+// vendor_file / vendor_content) share storage with their parent
+// (vendor) — they just filter the visible rules by match-type and
+// default the add-rule's match: accordingly.
 const KIND_READERS = {
   filename: readFilenameRules,
   content:  readContentRulesRaw,
   product:  readProductRulesRaw,
+  vendor:   readVendorRulesRaw,
+  building: readBuildingExtractorRulesRaw,
 };
 const KIND_WRITERS = {
   filename: writeFilenameRules,
   content:  writeContentRules,
   product:  writeProductRules,
+  vendor:   writeVendorRules,
+  building: writeBuildingExtractorRules,
 };
 
+const FILE_MATCHES    = new Set(["name", "path"]);
+const CONTENT_MATCHES = new Set(["first_page", "extract"]);
+
 function handleListClassifierRules(kind) {
-  const reader = KIND_READERS[kind];
-  if (!reader) return { ok: false, error: `Unknown classifier kind: ${kind}` };
+  const meta = CLASSIFIER_KINDS[kind];
+  if (!meta) return { ok: false, error: `Unknown classifier kind: ${kind}` };
+  // Split kinds delegate to their parent file. They show only the matching
+  // half of the rules; the editor then writes back the merged whole.
+  const parentKind = meta.parent || kind;
+  const reader = KIND_READERS[parentKind];
+  if (!reader) return { ok: false, error: `No reader for kind: ${parentKind}` };
   try {
-    const rules = reader();
-    return { ok: true, kind, meta: CLASSIFIER_KINDS[kind], rules };
+    let rules = reader();
+    if (meta.matchSubset === "file") {
+      rules = rules.filter((r) => FILE_MATCHES.has(r.match));
+    } else if (meta.matchSubset === "content") {
+      rules = rules.filter((r) => CONTENT_MATCHES.has(r.match));
+    }
+    return { ok: true, kind, meta, rules };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 }
 
 function handleSaveClassifierRules(kind, body) {
-  const writer = KIND_WRITERS[kind];
-  if (!writer) return { ok: false, error: `Unknown classifier kind: ${kind}` };
+  const meta = CLASSIFIER_KINDS[kind];
+  if (!meta) return { ok: false, error: `Unknown classifier kind: ${kind}` };
   if (!Array.isArray(body && body.rules)) {
     return { ok: false, error: "Body must include `rules` array." };
   }
+  const parentKind = meta.parent || kind;
+  const writer = KIND_WRITERS[parentKind];
+  const reader = KIND_READERS[parentKind];
+  if (!writer) return { ok: false, error: `No writer for kind: ${parentKind}` };
   try {
-    writer(body.rules);
-    return { ok: true, kind, count: body.rules.length };
+    let toWrite = body.rules;
+    // Split kinds: merge with the OTHER half of the parent file so we
+    // don't clobber it. The incoming `rules` are the user's edited view
+    // of the file/content half; we read the other half and concat.
+    if (meta.matchSubset && reader) {
+      const all = reader();
+      const isMatchInSubset = meta.matchSubset === "file" ? FILE_MATCHES : CONTENT_MATCHES;
+      const otherHalf = all.filter((r) => !isMatchInSubset.has(r.match));
+      // Validate: every rule the user supplied must be in the right half
+      // (otherwise the save would silently corrupt the file).
+      for (const r of body.rules) {
+        if (!isMatchInSubset.has(r.match)) {
+          return {
+            ok: false,
+            error: `Rule "${r.id}" has match=${r.match} which doesn't belong on the ${meta.matchSubset} side`,
+          };
+        }
+      }
+      toWrite = otherHalf.concat(body.rules);
+    }
+    writer(toWrite);
+    return { ok: true, kind, count: toWrite.length };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -975,8 +1350,9 @@ function handleIgnoredFiles() {
               v.name        AS vendor,
               CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS in_files
          FROM ignored_files i
-    LEFT JOIN files f   ON f.path = i.path
-    LEFT JOIN vendors v ON v.id   = f.vendor_id
+    LEFT JOIN files f      ON f.path = i.path
+    LEFT JOIN documents d  ON d.file_id = f.id
+    LEFT JOIN vendors v    ON v.id   = d.vendor_id
         ORDER BY i.added_at DESC, i.path`,
     ).all();
     return { ok: true, files: rows };
@@ -1057,21 +1433,94 @@ function handleDocumentTypeOptions() {
 // Whole-corpus snapshot for the Home dashboard. Returns per-table row counts
 // plus a per-document_type confidence breakdown. No filters — this is the
 // "overview" page, distinct from /api/stats which respects the table filters.
-function handleDashboard() {
+// sdt: optional filter scoping documents/files-derived stats to a single
+// source-data-type ("Vendor", "JobFiles", "Sales", "Any", or "" for all).
+// Vendors and products tables are inherently global so they aren't scoped —
+// the dashboard's vendor count means "vendors known to the system", not
+// "vendors with docs in this SDT".
+function handleDashboard(sdt) {
   const db = openDb();
   try {
     const counts = tableCounts(db);
+    const useSdt = sdt && sdt !== "All";
+    // Reusable scope clause + arg list for documents-derived queries.
+    // The SDT lives on files, so every scoped query joins files in.
+    const docScope = useSdt
+      ? "JOIN files f ON f.id = d.file_id WHERE f.source_data_type = ?"
+      : "";
+    const docScopeArgs = useSdt ? [sdt] : [];
 
-    const totalDocs = counts.documents;
+    // Total documents in scope (replaces counts.documents when SDT-scoped).
+    const totalDocs = useSdt
+      ? db.prepare("SELECT COUNT(*) AS n FROM documents d " + docScope)
+          .get(...docScopeArgs).n
+      : counts.documents;
+
+    // When SDT-scoped, override the per-table counts that *can* be
+    // SDT-filtered (everything that joins through files). Vendors and
+    // products stay global since they're inherently cross-corpus.
+    // document_products is scoped via its document → file chain.
+    // document_types is overridden to count distinct types that have AT
+    // LEAST ONE doc in the SDT (so JobFiles shows ~21 vs the global 43)
+    // — that matches what the user sees in the per-type breakdown table
+    // on the same page.
+    if (useSdt) {
+      counts.documents = totalDocs;
+      counts.files = db.prepare(
+        "SELECT COUNT(*) AS n FROM files WHERE source_data_type = ?",
+      ).get(sdt).n;
+      counts.document_extracts = db.prepare(
+        `SELECT COUNT(*) AS n
+         FROM document_extracts e
+         JOIN documents d ON d.id = e.document_id
+         JOIN files f     ON f.id = d.file_id
+         WHERE f.source_data_type = ?`,
+      ).get(sdt).n;
+      counts.document_products = db.prepare(
+        `SELECT COUNT(*) AS n
+         FROM document_products dp
+         JOIN documents d ON d.id = dp.document_id
+         JOIN files f     ON f.id = d.file_id
+         WHERE f.source_data_type = ?`,
+      ).get(sdt).n;
+      counts.document_types = db.prepare(
+        `SELECT COUNT(DISTINCT d.document_type_id) AS n
+         FROM documents d
+         JOIN files f ON f.id = d.file_id
+         WHERE f.source_data_type = ?
+           AND d.document_type_id IS NOT NULL`,
+      ).get(sdt).n;
+    }
+
     const classifiedTotal = db
-      .prepare("SELECT COUNT(*) AS n FROM documents WHERE document_type_id IS NOT NULL")
-      .get().n;
+      .prepare(
+        useSdt
+          ? "SELECT COUNT(*) AS n FROM documents d " + docScope +
+            " AND d.document_type_id IS NOT NULL"
+          : "SELECT COUNT(*) AS n FROM documents WHERE document_type_id IS NOT NULL",
+      )
+      .get(...docScopeArgs).n;
 
     // Per-doctype confidence breakdown. LEFT JOIN so types with zero documents
     // still appear (count = 0); the client decides whether to dim/hide them.
-    const rows = db
-      .prepare(
-        `SELECT dt.name AS name,
+    // When SDT-scoped, we join through files so only docs in the chosen SDT
+    // contribute to the per-type counts; types still appear (LEFT JOIN) but
+    // with total=0 if no in-scope docs use them.
+    const byTypeSql = useSdt
+      ? `SELECT dt.name AS name,
+                COUNT(d.id)                                              AS total,
+                SUM(CASE WHEN d.confidence = 'high'   THEN 1 ELSE 0 END) AS high,
+                SUM(CASE WHEN d.confidence = 'medium' THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN d.confidence = 'low'    THEN 1 ELSE 0 END) AS low
+         FROM document_types dt
+         LEFT JOIN documents d
+                ON d.document_type_id = dt.id
+         LEFT JOIN files f
+                ON f.id = d.file_id AND f.source_data_type = ?
+         WHERE d.id IS NULL OR f.id IS NOT NULL
+         GROUP BY dt.id, dt.name
+         ORDER BY total DESC, dt.name ASC`
+      : `SELECT dt.name AS name,
                 COUNT(d.id)                                              AS total,
                 SUM(CASE WHEN d.confidence = 'high'   THEN 1 ELSE 0 END) AS high,
                 SUM(CASE WHEN d.confidence = 'medium' THEN 1 ELSE 0 END) AS medium,
@@ -1079,9 +1528,8 @@ function handleDashboard() {
          FROM document_types dt
          LEFT JOIN documents d ON d.document_type_id = dt.id
          GROUP BY dt.id, dt.name
-         ORDER BY total DESC, dt.name ASC`,
-      )
-      .all();
+         ORDER BY total DESC, dt.name ASC`;
+    const rows = db.prepare(byTypeSql).all(...docScopeArgs);
 
     const byType = rows.map((r) => {
       const total = Number(r.total) || 0;
@@ -1111,31 +1559,42 @@ function handleDashboard() {
     // classified/charted). "Ignored" = file row exists but no documents row,
     // i.e. the ext is on ignored_file_types. Folder-ignored files don't
     // reach the files table at all when ignores were applied at ingest, so
-    // they're invisible here — that's correct.
-    const totalFiles = db.prepare("SELECT COUNT(*) AS n FROM files WHERE is_dir = 0").get().n;
-    const activeFiles = db.prepare(
-      `SELECT COUNT(*) AS n FROM files f
-       WHERE f.is_dir = 0
-         AND EXISTS (SELECT 1 FROM documents d WHERE d.file_id = f.id)`,
-    ).get().n;
+    // they're invisible here — that's correct. Scoped to SDT when set.
+    const sdtAndClause = useSdt ? "AND f.source_data_type = ?" : "";
+    const totalFiles = db
+      .prepare("SELECT COUNT(*) AS n FROM files f WHERE f.is_dir = 0 " + sdtAndClause)
+      .get(...docScopeArgs).n;
+    const activeFiles = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM files f " +
+        "WHERE f.is_dir = 0 " + sdtAndClause +
+        "  AND EXISTS (SELECT 1 FROM documents d WHERE d.file_id = f.id)",
+      )
+      .get(...docScopeArgs).n;
     const ignoredFiles = totalFiles - activeFiles;
 
     // KPIs surfaced as headline cards on the dashboard. Each "% with product"
     // metric counts a doc as covered if it has at least one row in
-    // document_products (any confidence, any source).
+    // document_products (any confidence, any source). When SDT-scoped, both
+    // numerator and denominator are restricted to docs in that SDT.
     function pctWithProduct(typeNames) {
       const placeholders = typeNames.map(() => "?").join(",");
+      const sdtJoin = useSdt ? " JOIN files f ON f.id = d.file_id " : "";
+      const sdtAnd  = useSdt ? " AND f.source_data_type = ? " : "";
+      const argsScoped = [...typeNames, ...docScopeArgs];
       const total = db.prepare(
-        `SELECT COUNT(*) AS n FROM documents d
-         JOIN document_types dt ON dt.id = d.document_type_id
-         WHERE dt.name IN (${placeholders})`,
-      ).get(...typeNames).n;
+        "SELECT COUNT(*) AS n FROM documents d " +
+        " JOIN document_types dt ON dt.id = d.document_type_id " +
+        sdtJoin +
+        ` WHERE dt.name IN (${placeholders}) ` + sdtAnd,
+      ).get(...argsScoped).n;
       const withProd = db.prepare(
-        `SELECT COUNT(*) AS n FROM documents d
-         JOIN document_types dt ON dt.id = d.document_type_id
-         WHERE dt.name IN (${placeholders})
-           AND EXISTS (SELECT 1 FROM document_products dp WHERE dp.document_id = d.id)`,
-      ).get(...typeNames).n;
+        "SELECT COUNT(*) AS n FROM documents d " +
+        " JOIN document_types dt ON dt.id = d.document_type_id " +
+        sdtJoin +
+        ` WHERE dt.name IN (${placeholders}) ` + sdtAnd +
+        "   AND EXISTS (SELECT 1 FROM document_products dp WHERE dp.document_id = d.id)",
+      ).get(...argsScoped).n;
       return {
         total,
         withProduct: withProd,
@@ -1147,6 +1606,9 @@ function handleDashboard() {
 
     // Reverse view of "manuals with a product": how many products have at
     // least one manual document tied to them. Pct is over total products.
+    // Not SDT-scoped because products are inherently global (a Notifier
+    // panel's manual could be referenced from a Vendor doc OR a JobFiles
+    // submittal; collapsing it would mislead).
     const MANUAL_TYPES = ["installation_manual", "programming_manual", "operations_manual"];
     const productsWithManualsRow = db.prepare(
       `SELECT COUNT(DISTINCT dp.product_id) AS n
@@ -1161,17 +1623,85 @@ function handleDashboard() {
       pct:          counts.products > 0 ? (productsWithManualsRow.n / counts.products) * 100 : 0,
     };
 
+    // Building coverage KPIs — the JobFiles analog of the product KPIs
+    // above. Same shape: pct of doc types in scope that got at least one
+    // building link, plus a reverse view counting how many buildings have
+    // at least one linked doc. Only emitted when SDT-scoped to JobFiles
+    // (or the all-docs view) since Vendor docs don't link to buildings.
+    function pctWithBuilding(typeNames) {
+      const placeholders = typeNames.map(() => "?").join(",");
+      const sdtJoin = useSdt ? " JOIN files f ON f.id = d.file_id " : "";
+      const sdtAnd  = useSdt ? " AND f.source_data_type = ? " : "";
+      const argsScoped = [...typeNames, ...docScopeArgs];
+      const total = db.prepare(
+        "SELECT COUNT(*) AS n FROM documents d " +
+        " JOIN document_types dt ON dt.id = d.document_type_id " +
+        sdtJoin +
+        ` WHERE dt.name IN (${placeholders}) ` + sdtAnd,
+      ).get(...argsScoped).n;
+      const withBldg = db.prepare(
+        "SELECT COUNT(*) AS n FROM documents d " +
+        " JOIN document_types dt ON dt.id = d.document_type_id " +
+        sdtJoin +
+        ` WHERE dt.name IN (${placeholders}) ` + sdtAnd +
+        "   AND EXISTS (SELECT 1 FROM document_buildings db WHERE db.document_id = d.id)",
+      ).get(...argsScoped).n;
+      return {
+        total,
+        withBuilding: withBldg,
+        pct: total > 0 ? (withBldg / total) * 100 : 0,
+      };
+    }
+    const contractsWithBuilding = pctWithBuilding(["contract", "subcontract", "purchase_order", "sales_order"]);
+    const invoicesWithBuilding  = pctWithBuilding(["invoice"]);
+    const proposalsWithBuilding = pctWithBuilding(["proposal", "quote", "estimate", "bid_workup"]);
+
+    // Reverse view: how many buildings (excluding ignored) have at least
+    // one linked document. Counts distinct extracted buildings (one row
+    // per canonical site or orphan), excluding any whose canonical_uid
+    // is in ignored_buildings. SDT-scoped via the JOIN through files.
+    const buildingsWithDocsRow = db.prepare(
+      `SELECT COUNT(DISTINCT db.building_id) AS n
+         FROM document_buildings db
+         JOIN documents d ON d.id = db.document_id
+         JOIN files f     ON f.id = d.file_id
+         JOIN buildings b ON b.id = db.building_id
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ignored_buildings ib
+            WHERE ib.building_uid = b.canonical_uid
+         )` + (useSdt ? " AND f.source_data_type = ?" : ""),
+    ).get(...docScopeArgs);
+    // Denominator: total extracted buildings excluding ignored ones.
+    const buildingsTotalRow = db.prepare(
+      `SELECT COUNT(*) AS n FROM buildings b
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ignored_buildings ib
+            WHERE ib.building_uid = b.canonical_uid
+         )`,
+    ).get();
+    const buildingsWithDocs = {
+      total:       buildingsTotalRow.n,
+      withDocs:    buildingsWithDocsRow.n,
+      pct:         buildingsTotalRow.n > 0 ? (buildingsWithDocsRow.n / buildingsTotalRow.n) * 100 : 0,
+    };
+
     const kpis = {
       pctClassified: totalDocs > 0 ? (classifiedTotal / totalDocs) * 100 : 0,
       vendors:       counts.vendors,
       products:      counts.products,
+      buildings:     counts.buildings,
       manualsWithProduct,
       datasheetsWithProduct,
       productsWithManuals,
+      contractsWithBuilding,
+      invoicesWithBuilding,
+      proposalsWithBuilding,
+      buildingsWithDocs,
     };
 
     return {
       ok: true,
+      sdt: useSdt ? sdt : "",
       counts,
       classification: {
         totalDocuments: totalDocs,
@@ -1203,6 +1733,9 @@ function handleStats(body = {}) {
     documentTypeFilters: Array.isArray(body.documentTypeFilters) ? body.documentTypeFilters : [],
     productFilter:       body.productFilter || "",
     hasProductFilter:    body.hasProductFilter || "",
+    sdtFilter:           body.sdtFilter || "",
+    buildingFilter:      body.buildingFilter || "",
+    hasBuildingFilter:   body.hasBuildingFilter || "",
   };
   const { from, where, args } = buildDocumentsWhere(filterArgs);
 
@@ -1229,6 +1762,17 @@ function handleStats(body = {}) {
     for (const r of confRows) {
       if (r.bucket in byConfidence) byConfidence[r.bucket] = r.n;
     }
+
+    // Source Data Type breakdown (Vendor / JobFiles / Sales / Any / unstamped).
+    // Pulled from the joined files row. Same filter chain as everything else.
+    const sdtRows = db
+      .prepare(
+        `SELECT COALESCE(NULLIF(f.source_data_type, ''), '(none)') AS sdt, COUNT(*) AS n
+         ${from} ${where}
+         GROUP BY sdt ORDER BY n DESC`,
+      )
+      .all(...args);
+    const bySdt = sdtRows.map((r) => ({ sdt: r.sdt, n: r.n }));
 
     // File extensions: same subset as the rest of the stats.
     const extRows = db
@@ -1282,16 +1826,22 @@ function handleStats(body = {}) {
     const byProductOther = productRows.slice(PRODUCT_TOP_N).map(
       (r) => ({ product: r.product_name, vendor: r.vendor_name, n: r.n }));
 
-    // (b) Distinct products discovered per vendor — informational chart.
-    //     Counts how many product rows each vendor has in the products
-    //     table (independent of doc-link counts).
+    // (b) Distinct products discovered per vendor — scoped to the filter
+    //     chain. Counts products that are linked to at least one document
+    //     in the filtered set, grouped by vendor. Goes empty when the
+    //     filter narrows to a corpus with no product links (e.g. JobFiles),
+    //     and the loadCharts code below hides the card in that case.
     const productsPerVendor = db
       .prepare(
-        `SELECT v.name AS vendor, COUNT(DISTINCT p.id) AS n
-         FROM products p JOIN vendors v ON v.id = p.vendor_id
-         GROUP BY v.id ORDER BY n DESC, v.name ASC LIMIT 30`,
+        `SELECT pv.name AS vendor, COUNT(DISTINCT pp.id) AS n
+         ${from}
+         JOIN document_products dp ON dp.document_id = d.id
+         JOIN products pp           ON pp.id = dp.product_id
+         JOIN vendors  pv           ON pv.id = pp.vendor_id
+         ${where}
+         GROUP BY pv.id ORDER BY n DESC, pv.name ASC LIMIT 30`,
       )
-      .all();
+      .all(...args);
 
     // (c) Coverage: how many of the (filtered) documents have at least
     //     one product link vs. zero. Subject to the same filter chain.
@@ -1304,12 +1854,61 @@ function handleStats(body = {}) {
       .get(...args).n;
     const docsWithoutProducts = total - docsWithProducts;
 
+    // --- Building-related aggregates -----------------------------------
+    // Top buildings by linked-doc count, scoped to the chart filter chain.
+    // Each chart slice represents one buildings.id (extracted reference);
+    // when a canonical row is matched, the label uses canonical_address,
+    // otherwise it falls back to the raw_address/raw_name on buildings.
+    const BUILDING_TOP_N = 20;
+    const buildingRows = db
+      .prepare(
+        `SELECT b.id                 AS building_id,
+                b.canonical_uid      AS canonical_uid,
+                b.raw_name           AS raw_name,
+                b.raw_address        AS raw_address,
+                b.raw_city           AS raw_city,
+                b.raw_state          AS raw_state,
+                cb.canonical_address AS canonical_address,
+                cb.canonical_city    AS canonical_city,
+                cb.canonical_state   AS canonical_state,
+                COUNT(DISTINCT d.id) AS n
+         ${from}
+         JOIN document_buildings db ON db.document_id = d.id
+         JOIN buildings b           ON b.id = db.building_id
+         LEFT JOIN canonical_buildings cb ON cb.building_uid = b.canonical_uid
+         ${where}
+         GROUP BY b.id ORDER BY n DESC, b.id`,
+      )
+      .all(...args);
+    const byBuildingTop = buildingRows.slice(0, BUILDING_TOP_N).map((r) => {
+      const addr = r.canonical_address || r.raw_address || r.raw_name || "(no address)";
+      const city = r.canonical_city || r.raw_city;
+      const st   = r.canonical_state || r.raw_state;
+      return {
+        building_id: r.building_id,
+        canonical_uid: r.canonical_uid,
+        label: addr + (city ? " · " + city : "") + (st ? ", " + st : ""),
+        n: r.n,
+      };
+    });
+
+    // Coverage: of the filtered docs, how many got at least one building link.
+    const docsWithBuildings = db
+      .prepare(
+        `SELECT COUNT(DISTINCT d.id) AS n ${from} ${where}` +
+          (where ? " AND" : " WHERE") +
+          " EXISTS (SELECT 1 FROM document_buildings db WHERE db.document_id = d.id)",
+      )
+      .get(...args).n;
+    const docsWithoutBuildings = total - docsWithBuildings;
+
     return {
       ok: true,
       total,
       classified,
       unclassified,
       byConfidence,
+      bySdt,
       byFileTypeTop,
       byFileTypeOther,
       byDocumentTypeTop,
@@ -1319,6 +1918,9 @@ function handleStats(body = {}) {
       productsPerVendor,
       docsWithProducts,
       docsWithoutProducts,
+      byBuildingTop,
+      docsWithBuildings,
+      docsWithoutBuildings,
       totalFiles: extRows.reduce((a, r) => a + r.n, 0),
       activeFilter: filterArgs,
     };
@@ -1386,38 +1988,93 @@ async function handleOpenFile(body) {
   }
 }
 
-// Walk a folder recursively, writing one path per line to
-// <folder>/basic_listing.txt. Paths are canonicalized to the S:\vendors\
-// form regardless of the chosen folder's actual location, so the existing
-// vendorOf() parser (which expects ['S:', 'vendors', vendor, ...]) keeps
-// working. Caller verified `folder` is a real directory.
+// Open the parent folder of a known file (or the folder itself if the
+// path IS a directory). On Windows we use `explorer /select,<file>` so
+// the file gets highlighted; on macOS `open -R`; on Linux we just open
+// the dirname with xdg-open. Same whitelist as handleOpenFile — caller
+// can only act on paths the DB knows about.
+async function handleOpenFolder(body) {
+  const reqPath = (body.path || "").trim();
+  if (!reqPath) return { ok: false, error: "Missing path." };
+
+  const db = openDb();
+  let known;
+  try {
+    known = db
+      .prepare("SELECT path, is_dir FROM files WHERE path = ?")
+      .get(reqPath);
+  } finally {
+    db.close();
+  }
+  if (!known) return { ok: false, error: "Path not in files table." };
+
+  const localPath = remapPath(reqPath);
+  // For a file, the target the OS opener acts on differs by platform:
+  //   Windows: pass the FILE to `explorer /select,` to highlight it.
+  //   macOS:   pass the FILE to `open -R` to reveal in Finder.
+  //   Linux:   pass the DIRNAME to xdg-open (no widely supported reveal).
+  // Either way we need the file to exist locally.
+  if (!fs.existsSync(localPath)) {
+    return {
+      ok: false,
+      error: `Path not found locally at ${localPath}` +
+        (localPath !== reqPath ? ` (remapped from ${reqPath})` : ""),
+    };
+  }
+
+  const { spawn } = await import("node:child_process");
+  try {
+    if (process.platform === "win32") {
+      // explorer.exe /select,<path> highlights the file in its parent
+      // folder. The path can't be quoted (explorer parses it differently
+      // than cmd does); we pass it as a separate argv element to avoid
+      // the cmd-escaping needed for the `start` builtin.
+      const child = spawn("explorer.exe", ["/select,", localPath], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    } else if (process.platform === "darwin") {
+      const child = spawn("open", ["-R", localPath], { detached: true, stdio: "ignore" });
+      child.unref();
+    } else {
+      const dir = path.dirname(localPath);
+      const child = spawn("xdg-open", [dir], { detached: true, stdio: "ignore" });
+      child.unref();
+    }
+    return { ok: true, path: reqPath, localPath };
+  } catch (e) {
+    return { ok: false, error: "Spawn failed: " + e.message };
+  }
+}
+
+// Walk a folder recursively and write one absolute path per line to
+// <folder>/basic_listing.txt. Equivalent to Windows `dir /b /s`. No
+// canonicalization — the path that lands in the file is the real path
+// on this machine. vendorOf()/sourceDataTypeOf() find the 'vendors' or
+// 'JobFiles' segment by name regardless of the prefix.
 //
-// The chosen folder is treated as the equivalent of S:\vendors\ — i.e.
-// each immediate subfolder is interpreted as a vendor.
+// Caller verified `folder` is a real directory.
 function generateBasicListing(folder) {
   const lines = [];
-  const stack = [{ rel: [], abs: folder }];
+  const stack = [folder];
   while (stack.length) {
-    const { rel, abs } = stack.pop();
+    const dir = stack.pop();
     let entries;
     try {
-      entries = fs.readdirSync(abs, { withFileTypes: true });
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (e) {
       // Surface the first failure but keep walking — bad ACL on one
       // subdir shouldn't kill the whole scan.
-      console.warn("[generateBasicListing]", abs, e.code || e.message);
+      console.warn("[generateBasicListing]", dir, e.code || e.message);
       continue;
     }
-    // Sort for stable output across runs.
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name === "basic_listing.txt" || entry.name === "listing.txt") continue;
-      const childRel = rel.concat(entry.name);
-      const canonical = "S:\\vendors\\" + childRel.join("\\");
-      lines.push(canonical);
-      if (entry.isDirectory()) {
-        stack.push({ rel: childRel, abs: path.join(abs, entry.name) });
-      }
+      const abs = path.join(dir, entry.name);
+      lines.push(abs);
+      if (entry.isDirectory()) stack.push(abs);
     }
   }
   // Sort so the output is byte-stable regardless of fs walk order.
@@ -1709,10 +2366,26 @@ function handleClassifyByContent() {
   }
 }
 
-function handleClassifyProducts() {
+function handleClassifyProducts(body = {}) {
+  const allowed = new Set(["all", "file", "content"]);
+  const mode = allowed.has(body.mode) ? body.mode : "all";
   const db = openDb();
   try {
-    const result = classifyAllByProduct(db);
+    const result = classifyAllByProduct(db, { mode });
+    return { ok: true, ...result, counts: tableCounts(db) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    db.close();
+  }
+}
+
+function handleClassifyVendors(body = {}) {
+  const allowed = new Set(["all", "file", "content"]);
+  const mode = allowed.has(body.mode) ? body.mode : "all";
+  const db = openDb();
+  try {
+    const result = classifyAllByVendor(db, { mode });
     return { ok: true, ...result, counts: tableCounts(db) };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -1739,20 +2412,31 @@ function handleExtractStop() {
 
 function handleExtractStatus() {
   // Plus a quick count of how many extracts are in the DB so the UI can
-  // show "X / Y of N PDFs extracted" even between runs.
+  // show "X / Y extractable docs extracted" even between runs. Counts
+  // .pdf and .docx — the two formats the extractor currently handles.
   const db = openDb();
-  let extractedCount = 0, totalPdfs = 0;
+  let extractedCount = 0, totalExtractable = 0;
   try {
     extractedCount = db.prepare(
       "SELECT COUNT(*) AS n FROM document_extracts WHERE error IS NULL"
     ).get().n;
-    totalPdfs = db.prepare(
-      "SELECT COUNT(*) AS n FROM documents d JOIN files f ON f.id = d.file_id WHERE f.file_type = '.pdf'"
+    totalExtractable = db.prepare(
+      `SELECT COUNT(*) AS n FROM documents d
+       JOIN files f ON f.id = d.file_id
+       WHERE f.file_type IN ('.pdf', '.docx')`
     ).get().n;
   } finally {
     db.close();
   }
-  return { ok: true, status: extractor.getStatus(), extractedCount, totalPdfs };
+  // Keep the legacy `totalPdfs` field name for back-compat with the
+  // status-poll client; it now means "total extractable", not "total PDFs".
+  return {
+    ok: true,
+    status: extractor.getStatus(),
+    extractedCount,
+    totalPdfs: totalExtractable,
+    totalExtractable,
+  };
 }
 
 // File hashing kickoff. Same shape as the extractor: caller polls
@@ -1783,6 +2467,65 @@ function handleHashStatus() {
   return { ok: true, status: hasher.getStatus(), hashedCount, totalDocs };
 }
 
+// Snowflake snapshot of Kent's BUILDING_CANONICAL + BUILDING_ADDRESS_XREF
+// into local buildings + building_addresses tables. Buildings are loaded
+// first so the addresses upsert can reference them via FK; address rows
+// whose building isn't in the new snapshot are reported as "orphaned" but
+// not an error. Idempotent — re-running upserts on PK collision.
+async function handleBuildingsSnapshot() {
+  try {
+    const b = await snapshotBuildings(openDb);
+    const a = await snapshotBuildingAddresses(openDb);
+    // Seed the ignored_buildings table with Pyrocomm's own offices once
+    // the buildings rows exist. Idempotent — re-running upserts on PK so
+    // the user's manual additions are never overwritten.
+    const i = seedPyrocommIgnored(openDb);
+    return { ok: true, buildings: b, addresses: a, ignored: i };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+function handleBuildingsMatchStart(body = {}) {
+  const onlyMissing = body.onlyMissing !== false;
+  const sdt = body.sdt || "JobFiles";
+  const allowed = new Set(["all", "file", "content"]);
+  const mode = allowed.has(body.mode) ? body.mode : "all";
+  const started = buildingsMatcher.start({ openDb, onlyMissing, sdt, mode });
+  if (!started) {
+    return { ok: false, error: "Buildings matcher is already running.", status: buildingsMatcher.getStatus() };
+  }
+  return { ok: true, status: buildingsMatcher.getStatus() };
+}
+
+function handleBuildingsMatchStop() {
+  const stopped = buildingsMatcher.stop();
+  return { ok: true, stopped, status: buildingsMatcher.getStatus() };
+}
+
+function handleBuildingsMatchStatus() {
+  const db = openDb();
+  let docBuildings = 0, totalCanonical = 0, extractedBuildings = 0;
+  try {
+    docBuildings       = db.prepare("SELECT COUNT(DISTINCT document_id) AS n FROM document_buildings").get().n;
+    totalCanonical     = db.prepare("SELECT COUNT(*) AS n FROM canonical_buildings").get().n;
+    extractedBuildings = db.prepare("SELECT COUNT(*) AS n FROM buildings").get().n;
+  } finally {
+    db.close();
+  }
+  return {
+    ok: true,
+    status: buildingsMatcher.getStatus(),
+    docBuildings,
+    extractedBuildings,
+    // Keep the legacy field name `totalBuildings` to avoid breaking the
+    // status-pill text on the client; semantically it now means
+    // "canonical buildings in snapshot" and the client label still reads
+    // correctly.
+    totalBuildings: totalCanonical,
+  };
+}
+
 // Read-only duplicate report — returns clusters of documents sharing
 // a sha256. UI renders one section per cluster.
 function handleDuplicates() {
@@ -1800,19 +2543,28 @@ function handlePurge(body) {
   try {
     if (target === "all") {
       // Order matters: child tables first to satisfy FK constraints.
-      //   files     → cascades to documents, document_extracts, document_products
+      //   files     → cascades to documents, document_extracts,
+      //               document_products, document_buildings
+      //   buildings → independent of files; cleared explicitly here
+      //               since they're ephemeral extraction artifacts
       //   products  → owned by vendors via FK; clear before deleting vendors
       //   vendors   → safe to delete once products is empty
-      // Intentionally preserved:
-      //   document_types     one-time taxonomy snapshot, no reason to reseed
-      //   ignored_file_types user-curated ingest config, survives data wipes
-      //   ignored_folders    user-curated ingest config, survives data wipes
+      // Intentionally preserved (canonical / curated reference data):
+      //   document_types       taxonomy, no reason to reseed
+      //   ignored_file_types   user-curated ingest config
+      //   ignored_folders      user-curated ingest config
+      //   ignored_files        user-curated per-file blocklist
+      //   canonical_buildings  snapshotted from Kent's Snowflake; expensive
+      //                        to refetch and not regenerable locally
+      //   building_addresses   same — snapshotted from Snowflake
+      //   ignored_buildings    user-curated blocklist (Pyrocomm offices etc)
       db.exec("DELETE FROM files");
+      db.exec("DELETE FROM buildings");
       db.exec("DELETE FROM products");
       db.exec("DELETE FROM vendors");
       db.exec(
         "DELETE FROM sqlite_sequence WHERE name IN " +
-        "('vendors', 'files', 'documents', 'products')",
+        "('vendors', 'files', 'documents', 'products', 'buildings')",
       );
       return { ok: true, target, counts: tableCounts(db) };
     }
@@ -1846,6 +2598,13 @@ function handlePurge(body) {
       db.exec("DELETE FROM sqlite_sequence WHERE name = 'vendors'");
       return { ok: true, target, counts: tableCounts(db) };
     }
+    if (target === "hashes") {
+      // Clear documents.sha256 only — leaves the .hash sidecar files on
+      // disk so the next hash run can restore from cache. Use "Purge text
+      // backups" to also delete the on-disk sidecars.
+      const r = db.prepare("UPDATE documents SET sha256 = NULL WHERE sha256 IS NOT NULL").run();
+      return { ok: true, target, cleared: Number(r.changes), counts: tableCounts(db) };
+    }
     return { ok: false, error: `Unknown purge target: ${target}` };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -1865,134 +2624,284 @@ const PAGE = String.raw`<!DOCTYPE html>
 <style>
   :root {
     --bg: #ffffff;
-    --panel: #f5f3f7;
-    --inset: #fafafc;        /* inputs, code blocks, log strip */
-    --hover: #ebe7ef;        /* row hover, button hover */
-    --hover-strong: #ddd5e3; /* deeper hover for nested controls */
-    --border: #c8c2d0;
-    --border-row: #e2dde7;   /* horizontal table row separators */
-    --border-col: #ccc3d4;   /* vertical column separators */
-    --text: #1a1820;
-    --muted: #6a6573;
-    --accent: #8b2090;
-    --accent-bg: #f0d8f3;
-    --danger: #b03030;
-    --danger-bg: #fbe5e5;
-    --danger-text: #6a1010;
-    --ok: #2c7a2c;
-    --error-text: #b03030;
+    --panel: #f4f4f4;
+    --inset: #fafafa;        /* inputs, code blocks, log strip */
+    --hover: #ebebeb;        /* row hover, button hover */
+    --hover-strong: #dcdcdc; /* deeper hover for nested controls */
+    --border: #d0d0d0;
+    --border-row: #e6e6e6;   /* horizontal table row separators */
+    --border-col: #d8d8d8;   /* vertical column separators */
+    --text: #111111;
+    --muted: #666666;
+    --accent: #c8102e;
+    --accent-bg: #fbe6ea;
+    --danger: #c8102e;
+    --danger-bg: #fbe6ea;
+    --danger-text: #8a0a1f;
+    --ok: #111111;
+    --error-text: #c8102e;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 0;
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    font-feature-settings: "cv11", "ss01", "ss03";
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
     background: var(--bg); color: var(--text);
     height: 100vh; display: flex; flex-direction: column; overflow: hidden;
   }
   header {
-    padding: 8px 14px; background: var(--panel);
+    padding: 6px 12px; background: var(--bg);
     border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   }
-  header h1 { font-size: 14px; font-weight: 600; margin: 0; color: var(--accent); }
-  header .meta { font-size: 12px; color: var(--muted); }
+  header h1 {
+    font-size: 13px; font-weight: 600; margin: 0; color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  header h1::before {
+    content: ""; display: inline-block; width: 8px; height: 8px;
+    background: var(--accent); margin-right: 8px; vertical-align: 1px;
+  }
+  header .meta { font-size: 11.5px; color: var(--muted); }
+  header #sdt-control {
+    display: inline-flex; align-items: center; margin-left: 14px;
+    padding: 2px 8px;
+    background: var(--inset); border: 1px solid var(--border); border-radius: 2px;
+  }
+  header #sdt-control select {
+    font-size: 11.5px; padding: 1px 4px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 2px;
+    cursor: pointer; font-family: inherit;
+  }
+  header #sdt-control select:hover { border-color: var(--text); }
+
+  /* SDT pill — appears in sidebar Source data + Status sections.
+     Reads "Using Vendor Rules" / "Using JobFiles Rules" / "Using Any Rules". */
+  .sdt-pill {
+    display: block;
+    background: var(--inset); color: var(--text);
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 2px;
+    padding: 3px 8px; margin: 3px 0 6px 0;
+    font-size: 10.5px; font-weight: 500; letter-spacing: 0.02em;
+    text-align: left;
+  }
   header .spacer { flex: 1; }
   header a.help-link {
-    font-size: 12px; color: var(--accent); text-decoration: none;
-    padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px;
+    font-size: 11.5px; color: var(--text); text-decoration: none;
+    padding: 2px 8px; border: 1px solid var(--border); border-radius: 2px;
     background: var(--inset);
   }
-  header a.help-link:hover { background: var(--hover); border-color: var(--accent); }
+  header a.help-link:hover { background: var(--hover); border-color: var(--text); }
   main { flex: 1; display: flex; min-height: 0; }
   aside {
-    width: 280px; border-right: 1px solid var(--border);
-    padding: 12px; overflow-y: auto;
+    width: 232px; border-right: 1px solid var(--border);
+    padding: 8px 6px;
     background: var(--panel);
     position: relative;
-    transition: width 0.15s ease;
+    transition: width 0.12s ease;
+    font-size: 12px;
+    /* Flex column so #sidebar-nav can scroll while #sidebar-status stays
+       pinned at the bottom. min-height:0 lets the nav child actually
+       shrink; without it the column would just grow past the viewport. */
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  /* Scrollable navigation region — everything above the pinned Status. */
+  #sidebar-nav {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    margin: 0 -6px; padding: 0 6px;
+  }
+  /* Pinned status footer — always visible regardless of nav scroll. */
+  #sidebar-status {
+    flex: 0 0 auto;
+    margin: 8px -6px 0 -6px; padding: 8px 6px 0 6px;
+    border-top: 1px solid var(--border);
+  }
+  #sidebar-status-header {
+    /* Same treatment as the top-level <details> summaries so it reads
+       as a peer section header, just non-collapsible. */
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; color: var(--muted);
+    padding: 0 8px; margin: 0 0 4px 0;
   }
   /* Collapsed: narrow strip just wide enough for the toggle button.
      All children except the toggle are hidden. */
-  aside.collapsed { width: 28px; padding: 8px 4px; overflow: hidden; }
+  aside.collapsed { width: 24px; padding: 6px 2px; overflow: hidden; display: block; }
   aside.collapsed > :not(#sidebar-toggle) { display: none; }
+  /* Drag handle on the sidebar's right edge. 4px wide hit area, only
+     visible on hover/drag so it doesn't compete with content. The
+     transition on aside.width is suppressed during drag so the panel
+     follows the pointer 1:1 (handled in JS via .resizing class). */
+  #sidebar-resizer {
+    position: absolute; top: 0; right: -2px; bottom: 0; width: 4px;
+    cursor: ew-resize;
+    background: transparent;
+    z-index: 10;
+  }
+  #sidebar-resizer:hover, #sidebar-resizer.dragging {
+    background: var(--accent);
+  }
+  aside.collapsed #sidebar-resizer { display: none; }
+  aside.resizing { transition: none !important; }
+  body.resizing-sidebar, body.resizing-sidebar * { cursor: ew-resize !important; user-select: none !important; }
   #sidebar-toggle {
-    position: absolute; top: 8px; right: 6px;
-    width: 18px; height: 22px; padding: 0;
+    position: absolute; top: 6px; right: 4px;
+    width: 16px; height: 20px; padding: 0;
     background: transparent; color: var(--muted);
-    border: 1px solid var(--border); border-radius: 3px;
-    cursor: pointer; font-size: 12px; line-height: 1;
+    border: 1px solid var(--border); border-radius: 2px;
+    cursor: pointer; font-size: 11px; line-height: 1;
   }
   #sidebar-toggle:hover { color: var(--text); border-color: var(--accent); }
   aside.collapsed #sidebar-toggle {
     /* Centered when collapsed, with a different glyph. */
-    top: 8px; left: 50%; right: auto; transform: translateX(-50%);
+    top: 6px; left: 50%; right: auto; transform: translateX(-50%);
   }
-  aside h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-    color: var(--muted); margin: 14px 0 6px 0;
+  /* Master sidebar typography — every navigation row in the sidebar uses
+     the same font / size / case / weight. Hierarchy is conveyed by left
+     padding (see --depth-* tokens below) and by an optional disclosure
+     caret. Color stays muted by default so the active row pops. */
+  aside h2,
+  aside details > summary,
+  aside .table-row,
+  aside .sub-summary,
+  aside .chart-folder-summary,
+  aside .chart-preset,
+  aside details.action-sub > summary,
+  aside details.extractor-sub > summary,
+  aside .action-row,
+  aside table.sidebar-summary td,
+  aside .menu-trigger,
+  aside .menu-item,
+  aside #use-ignores-wrap,
+  aside label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; line-height: 1.3; color: var(--muted);
   }
-  aside h2:first-child { margin-top: 0; padding-right: 26px; }
+  aside h2 { margin: 6px 0 2px 0; }
+  aside h2:first-child { margin-top: 0; padding-right: 22px; }
+
+  /* .table-row default: depth-1 (16px), used when the row sits directly
+     under a top-level <details> body (no sub-summary parent). Deeper
+     nesting is handled by the more-specific selectors below. */
   aside .table-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 6px 8px; cursor: pointer; border-radius: 4px;
-    font-size: 13px;
+    padding: 1px 8px 1px 16px;
+    cursor: pointer; border-radius: 2px;
+    color: var(--text);
   }
   aside .table-row:hover { background: var(--hover); }
-  aside .table-row.active { background: var(--accent-bg); color: var(--text); }
-  aside .table-row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  aside .table-row.active { background: var(--text); color: var(--bg); }
+  aside .table-row.active .count { color: var(--bg); opacity: 0.7; }
+  aside .table-row .count {
+    color: var(--muted); font-variant-numeric: tabular-nums;
+    font-size: 10px; letter-spacing: 0.08em;
+  }
+  aside .table-row.active .count { color: var(--bg); }
 
-  /* Compact 2-col summary table used inside the Source data section to show
-     document_types / ignored types / ignored folders with their counts. Each
-     row behaves like a .table-row (hover, active highlight, click). */
+  /* Compact 2-col summary table inside Source data. Same typography +
+     depth-1 indent as .table-row so it reads as a sibling clickable row. */
   aside table.sidebar-summary {
-    width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px;
+    width: 100%; border-collapse: collapse; margin-top: 2px;
   }
   aside table.sidebar-summary tr { cursor: pointer; }
   aside table.sidebar-summary tr:hover td { background: var(--hover); }
-  aside table.sidebar-summary tr.active td { background: var(--accent-bg); color: var(--text); }
+  aside table.sidebar-summary tr.active td { background: var(--text); color: var(--bg); }
+  aside table.sidebar-summary tr.active td.count { color: var(--bg); opacity: 0.7; }
   aside table.sidebar-summary td {
-    padding: 6px 8px; border-radius: 4px;
+    padding: 1px 8px 1px 16px; border-radius: 2px; color: var(--text);
   }
   aside table.sidebar-summary td.count {
     color: var(--muted); font-variant-numeric: tabular-nums;
     text-align: right; width: 40px;
   }
-  /* Chart-preset shortcut links sit under "📊 All documents" and apply a
-     pre-built filter chain when clicked. Lightly muted + slightly smaller
-     so the parent (📊 All documents) stays visually primary. */
-  aside .chart-preset {
-    padding: 4px 8px 4px 24px; cursor: pointer; border-radius: 4px;
-    font-size: 12px; color: var(--muted);
+
+  /* Depth-2: sub-summary headers (DASHBOARDS, CHARTS, DUPLICATES under
+     Reports). Same master typography; depth differentiated by indent. */
+  aside .sub-summary {
+    padding: 1px 8px 1px 16px; margin-top: 1px;
+    cursor: pointer; color: var(--text);
+    display: flex; align-items: center; gap: 5px;
   }
-  aside .chart-preset:hover { background: var(--hover); color: var(--text); }
-  aside .chart-preset.active { background: var(--accent-bg); color: var(--text); }
-  aside label { display: block; font-size: 12px; color: var(--muted); margin: 6px 0 3px 0; }
+  aside .sub-summary::-webkit-details-marker { display: none; }
+  aside .sub-summary::before {
+    content: "▸"; font-size: 8px; transition: transform 0.1s;
+    display: inline-block; width: 8px;
+  }
+  aside details[open] > .sub-summary::before { transform: rotate(90deg); }
+  aside .sub-summary:hover { color: var(--accent); }
+
+  /* Depth-3: inner chart-folder headers (CLASSIFICATION, SOURCE DATA
+     TYPE, FILETYPE inside Charts). */
+  aside .chart-folder { margin-left: 0; }
+  aside .chart-folder-summary {
+    padding: 1px 8px 1px 24px; margin-top: 1px;
+    cursor: pointer; color: var(--text);
+    display: flex; align-items: center; gap: 5px;
+  }
+  aside .chart-folder-summary::-webkit-details-marker { display: none; }
+  aside .chart-folder-summary::before {
+    content: "▸"; font-size: 8px; transition: transform 0.1s;
+    display: inline-block; width: 8px;
+  }
+  aside details[open] > .chart-folder-summary::before { transform: rotate(90deg); }
+  aside .chart-folder-summary:hover { color: var(--accent); }
+
+  /* Depth-2 leaves: rows whose enclosing <details> has a .sub-summary
+     header. Covers .table-row siblings of sub-summaries (Find duplicates
+     under Duplicates; Content/Filename rules under Type Classifiers;
+     Building/Product Extractor under Entity Extraction; All documents/
+     JobFiles/Vendor under Dashboards; Ephemeral sidebar table-rows). */
+  aside details:has(> .sub-summary) > .table-row,
+  aside details:has(> .sub-summary) #table-list .table-row,
+  aside details:has(> .sub-summary) .table-list .table-row,
+  aside details:has(> .sub-summary) > table.sidebar-summary td {
+    padding-left: 24px;
+  }
+
+  /* Depth-3 leaves: rows whose enclosing <details> has a
+     .chart-folder-summary header. Covers chart-preset rows AND the
+     folder's "All …" anchor (.table-row sibling of chart-folder-summary). */
+  aside .chart-preset {
+    padding: 1px 8px 1px 32px; cursor: pointer; border-radius: 2px;
+    color: var(--text);
+  }
+  aside .chart-preset:hover { background: var(--hover); }
+  aside .chart-preset.active { background: var(--text); color: var(--bg); }
+  aside .chart-folder > .table-row {
+    padding-left: 32px;
+  }
+  aside label { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); margin: 4px 0 2px 0; }
   aside input[type=text] {
-    width: 100%; padding: 5px 7px; font-size: 12px;
+    width: 100%; padding: 4px 6px; font-size: 12px; line-height: 1.4;
     background: var(--inset); color: var(--text);
-    border: 1px solid var(--border); border-radius: 3px;
-    font-family: monospace;
+    border: 1px solid var(--border); border-radius: 2px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   #listing-display {
-    padding: 8px;
-    border: 1px solid var(--border); border-radius: 4px;
-    background: var(--inset); font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--border); border-radius: 2px;
+    background: var(--inset); font-size: 12px; line-height: 1.4;
     word-break: break-all;
   }
   .extract-status {
-    padding: 6px 8px; margin-bottom: 4px;
-    background: var(--inset); border: 1px solid var(--border); border-radius: 3px;
-    font-size: 11px; color: var(--muted); font-family: monospace;
+    padding: 4px 8px; margin-bottom: 3px;
+    background: var(--inset); border: 1px solid var(--border); border-radius: 2px;
+    font-size: 10.5px; color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   .extract-status.running { color: var(--accent); border-color: var(--accent); }
   .extract-status .current {
-    margin-top: 4px; word-break: break-all; color: var(--text);
+    margin-top: 3px; word-break: break-all; color: var(--text);
     font-size: 10px; opacity: 0.8;
   }
   #listing-display .listing-empty { color: var(--muted); font-style: italic; }
-  #listing-display .listing-name { color: var(--accent); font-weight: 600; }
+  #listing-display .listing-name { color: var(--text); font-weight: 600; }
   #listing-display .listing-path {
-    color: var(--muted); font-family: monospace; font-size: 11px; margin-top: 3px;
+    color: var(--muted);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10.5px; margin-top: 2px;
   }
   /* Modal: dimmed backdrop + centered panel. */
   .modal-backdrop {
@@ -2031,7 +2940,7 @@ const PAGE = String.raw`<!DOCTYPE html>
     background: var(--accent-bg); color: var(--text);
     border: 1px solid var(--accent); border-radius: 3px; cursor: pointer;
   }
-  .modal-actions .primary:hover { background: var(--accent); color: #000; }
+  .modal-actions .primary:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
   .modal-actions .primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .modal-hint { color: var(--muted); font-size: 11px; }
   .modal-list { flex: 1; overflow-y: auto; padding: 4px 0; }
@@ -2080,16 +2989,16 @@ const PAGE = String.raw`<!DOCTYPE html>
   }
   .extract-panel .empty { padding: 24px; color: var(--muted); text-align: center; }
   aside button {
-    width: 100%; padding: 7px; margin-top: 5px; font-size: 12px;
-    background: var(--accent-bg); color: var(--text);
-    border: 1px solid var(--accent); border-radius: 3px;
-    cursor: pointer;
+    width: 100%; padding: 5px 8px; margin-top: 4px; font-size: 11.5px;
+    background: var(--text); color: var(--bg);
+    border: 1px solid var(--text); border-radius: 2px;
+    cursor: pointer; font-family: inherit; font-weight: 500;
   }
-  aside button:hover { background: var(--accent); color: #000; }
+  aside button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
   aside button.danger { background: var(--danger-bg); border-color: var(--danger); color: var(--danger-text); }
   aside button.danger:hover { background: var(--danger); color: #fff; }
   aside button.secondary { background: var(--inset); border-color: var(--border); color: var(--text); }
-  aside button.secondary:hover { background: var(--hover); }
+  aside button.secondary:hover { background: var(--hover); border-color: var(--text); }
   aside button:disabled { opacity: 0.5; cursor: not-allowed; }
   /* Progress-fill: button background becomes a sharp left-to-right split
      between accent (filled) and inset (unfilled) at --progress percent.
@@ -2201,6 +3110,25 @@ const PAGE = String.raw`<!DOCTYPE html>
      explicit height the canvas grows unboundedly inside a flex container. */
   .chart-box { width: 360px; height: 360px; position: relative; }
   .chart-box canvas { cursor: pointer; }
+  /* Filter chips: one per active selection in the chart-page filter chain.
+     Each carries an × that drops just that dimension. */
+  .chip { display: inline-flex; align-items: center; gap: 6px;
+          background: var(--panel); border: 1px solid var(--border);
+          border-radius: 3px; padding: 2px 4px 2px 10px; font-size: 12px;
+          color: var(--text); margin-left: 6px; }
+  .chip.root { background: transparent; border-color: transparent;
+               color: var(--muted); padding-left: 0; padding-right: 0;
+               margin-left: 0; margin-right: 4px; }
+  .chip .chip-x { background: transparent; border: 0; color: var(--muted);
+                  cursor: pointer; font-size: 14px; line-height: 1;
+                  padding: 0 4px; border-radius: 2px; }
+  .chip .chip-x:hover { background: var(--hover); color: var(--text); }
+  .chip-sep { color: var(--muted); margin-left: 6px; }
+  /* Column-reorder affordances. Cursor hint on draggable headers, then
+     visible feedback for the dragged source and the current drop target. */
+  th.col-draggable .sort-label { cursor: grab; }
+  th.col-dragging { opacity: 0.5; }
+  th.col-drop-target { box-shadow: inset 3px 0 0 var(--accent); }
   .toolbar .meta { font-size: 12px; color: var(--muted); margin-left: auto; }
   .table-wrap { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 3px; }
   /* table-layout:fixed honors explicit column widths from the first row.
@@ -2253,6 +3181,38 @@ const PAGE = String.raw`<!DOCTYPE html>
     text-underline-offset: 2px; cursor: pointer;
   }
   tbody td a.open-link:hover { color: var(--accent); text-decoration-color: var(--accent); }
+  /* Trailing actions column on documents/files. Holds the ⋮ button or
+     inline links and must not truncate — overflow:visible defeats the
+     table-wide ellipsis, and the explicit width on the th sizes the
+     column for the full content. */
+  thead th.actions-cell, tbody td.actions-cell {
+    overflow: visible;
+    text-overflow: clip;
+    padding-right: 6px;
+  }
+  /* ⋮ button on the documents row. Subtle by default, accent on hover. */
+  .row-menu-btn {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1;
+    padding: 0 6px; border-radius: 3px;
+  }
+  .row-menu-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border); }
+  /* Popup floats above the table; absolute positioning + body-level mount
+     so we don't get clipped by the table-wrap's overflow. */
+  .row-menu {
+    position: fixed; z-index: 1000;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 2px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+    min-width: 180px; padding: 3px 0;
+  }
+  .row-menu-item {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    background: transparent; border: 0; color: var(--text);
+    font: inherit; font-size: 11.5px;
+    padding: 5px 12px; cursor: pointer;
+  }
+  .row-menu-item:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  .row-menu-item:disabled { color: var(--muted); cursor: default; }
   #log-wrap {
     margin-top: 8px;
     background: var(--inset); border: 1px solid var(--border); border-radius: 3px;
@@ -2278,28 +3238,38 @@ const PAGE = String.raw`<!DOCTYPE html>
   #log .entry.ok { color: var(--ok); }
   #log .entry.err { color: var(--error-text); }
   #log .entry.info { color: var(--muted); }
+  /* Replayed entries (loaded from localStorage at boot) get a subtle
+     left bar so users can see what's history vs. live. The class is
+     applied alongside the ok/err/info kind class. */
+  #log .entry.replayed {
+    border-left: 2px solid var(--border);
+    padding-left: 6px; opacity: 0.75;
+  }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
 
   /* Collapsible sidebar sections. <summary> acts as the section header
      (mirroring the existing h2 styling) and clicking toggles the body. */
   aside details {
-    margin: 14px 0 0 0;
+    margin: 4px 0 0 0;
   }
   aside details > summary {
     list-style: none;
     cursor: pointer;
-    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-    color: var(--muted); margin: 0 0 6px 0;
+    /* font-size / text-transform / letter-spacing / weight / color come
+       from the master rule that names every nav row. Override only the
+       depth-specific bits here. */
+    margin: 0 0 1px 0;
+    padding: 0 8px;
     user-select: none;
-    display: flex; align-items: center; gap: 6px;
+    display: flex; align-items: center; gap: 5px;
   }
   aside details > summary::-webkit-details-marker { display: none; }
   aside details > summary::before {
     content: "▸";
-    font-size: 9px;
+    font-size: 8px;
     transition: transform 0.1s;
     display: inline-block;
-    width: 10px;
+    width: 8px;
   }
   aside details[open] > summary::before { transform: rotate(90deg); }
   aside details > summary:hover { color: var(--text); }
@@ -2309,32 +3279,33 @@ const PAGE = String.raw`<!DOCTYPE html>
     background: var(--accent); color: var(--bg);
     border-color: var(--accent); font-weight: 600;
   }
-  aside button.headline:hover { background: var(--accent-bg); color: var(--accent); }
+  aside button.headline:hover { background: #a30d26; border-color: #a30d26; }
 
   /* Click-to-open menus (Purge, Ingest). The trigger looks like an aside
      button; the panel pops out below and floats above following content. */
   aside .menu-wrap { position: relative; }
   aside .menu-trigger {
-    width: 100%; padding: 7px; margin-top: 5px; font-size: 12px;
+    width: 100%; padding: 5px 7px; margin-top: 4px;
+    font-size: 12px; line-height: 1.4;
     background: var(--inset); color: var(--text);
-    border: 1px solid var(--border); border-radius: 3px;
+    border: 1px solid var(--border); border-radius: 2px;
     cursor: pointer; text-align: left;
     display: flex; justify-content: space-between; align-items: center;
   }
-  aside .menu-trigger:hover { background: var(--hover); border-color: var(--accent); }
-  aside .menu-trigger.open  { background: var(--hover); border-color: var(--accent); }
-  aside .menu-trigger .caret { color: var(--muted); font-size: 10px; }
+  aside .menu-trigger:hover { background: var(--hover); border-color: var(--text); }
+  aside .menu-trigger.open  { background: var(--hover); border-color: var(--text); }
+  aside .menu-trigger .caret { color: var(--muted); font-size: 9px; }
   aside .menu-panel {
     position: absolute; top: 100%; left: 0; right: 0;
-    margin-top: 2px; padding: 4px;
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 3px;
+    margin-top: 2px; padding: 3px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 2px;
     z-index: 60;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
   }
   aside .menu-item {
-    padding: 6px 10px; cursor: pointer; border-radius: 3px;
-    font-size: 12px; color: var(--text);
+    padding: 4px 8px; cursor: pointer; border-radius: 2px;
+    font-size: 12px; line-height: 1.4; color: var(--text);
   }
   aside .menu-item:hover { background: var(--hover); }
   aside .menu-item.danger { color: var(--danger-text); }
@@ -2344,31 +3315,65 @@ const PAGE = String.raw`<!DOCTYPE html>
   /* Inline action menu inside the sidebar. Outer details is the "Actions"
      section; nested details.action-sub are the three groups (Purge /
      Ingest / Classify & Extract). Action rows look the same in any group. */
-  aside details.action-sub { margin: 4px 0 4px 12px; }
+  /* Depth-2: action-sub summary (PURGE, INGEST, EXTRACT, …). */
+  aside details.action-sub { margin: 0; }
   aside details.action-sub > summary {
-    padding: 4px 6px; border-radius: 3px;
-    text-transform: none; letter-spacing: 0; font-size: 12px;
-    color: var(--text);
+    padding: 1px 8px 1px 16px; margin-top: 1px; border-radius: 2px;
+    color: var(--text); cursor: pointer;
+    display: flex; align-items: center; gap: 5px;
   }
+  aside details.action-sub > summary::-webkit-details-marker { display: none; }
+  aside details.action-sub > summary::before {
+    content: "▸"; font-size: 8px; transition: transform 0.1s;
+    display: inline-block; width: 8px;
+  }
+  aside details.action-sub[open] > summary::before { transform: rotate(90deg); }
   aside details.action-sub > summary:hover { background: var(--hover); }
+  /* Depth-2: action rows (PURGE ALL, RUN ALL, …) sit one level deeper
+     than their action-sub summary. */
   aside .action-row {
-    padding: 6px 8px 6px 26px; cursor: pointer; border-radius: 3px;
-    font-size: 12px; color: var(--text);
+    padding: 1px 8px 1px 24px; cursor: pointer; border-radius: 2px;
+    color: var(--text);
   }
   aside .action-row:hover { background: var(--hover); }
   aside .action-row.danger { color: var(--danger-text); }
   aside .action-row.danger:hover { background: var(--danger); color: #fff; }
-  aside .action-row.headline { color: var(--accent); font-weight: 600; }
+  aside .action-row.headline { color: var(--accent); }
   aside .action-row.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+  /* Depth-3: extractor-sub summary (VENDOR EXTRACTOR, PRODUCT EXTRACTOR,
+     BUILDING EXTRACTOR — nested inside the EXTRACTORS action-sub). */
+  aside details.extractor-sub > summary {
+    padding: 1px 8px 1px 24px; border-radius: 2px;
+    color: var(--text); cursor: pointer;
+    display: flex; align-items: center; gap: 5px;
+  }
+  aside details.extractor-sub > summary::-webkit-details-marker { display: none; }
+  aside details.extractor-sub > summary::before {
+    content: "▸"; font-size: 8px; transition: transform 0.1s;
+    display: inline-block; width: 8px;
+  }
+  aside details.extractor-sub[open] > summary::before { transform: rotate(90deg); }
+  aside details.extractor-sub > summary:hover { background: var(--hover); }
+  /* Depth-4: action-rows inside an extractor-sub (RUN ALL, RUN FILE
+     EXTRACTOR, …). Selector wins over the generic .action-row above
+     because of the parent-class qualifier. */
+  aside details.extractor-sub > .action-row {
+    padding-left: 32px;
+  }
   aside .action-row .desc {
-    display: block; color: var(--muted); font-size: 10px; font-weight: normal; margin-top: 2px;
+    /* Description sub-line: slightly smaller still uppercase, normal weight,
+       sits under the action label. */
+    display: block; color: var(--muted);
+    font-size: 9px; font-weight: 400; letter-spacing: 0.06em;
+    line-height: 1.3; margin-top: 0;
   }
   aside .action-row.danger:hover .desc { color: rgba(255,255,255,0.85); }
-  /* Inline checkbox label inside the Ingest sub-menu — controls whether
-     ingest applies the ignored-types/folders lists. */
+  /* Inline checkbox label inside the Ingest sub-menu — same depth as
+     its sibling action rows. */
   aside #use-ignores-wrap {
-    display: flex; align-items: center; gap: 6px;
-    padding: 4px 8px 4px 26px; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 8px 3px 24px;
+    color: var(--muted);
     cursor: pointer; user-select: none;
   }
   aside #use-ignores-wrap input { margin: 0; cursor: pointer; }
@@ -2421,9 +3426,13 @@ const PAGE = String.raw`<!DOCTYPE html>
     color: var(--muted); font-size: 11px; margin-top: 2px;
   }
 
-  /* Two-column split: Ephemeral (data tables) | Canonical (curated/seed). */
+  /* Two-column split: Ephemeral (data tables) | Canonical (curated/seed).
+     Right column auto-sizes to the natural width of its cards so we don't
+     get an awkward empty cell when Canonical has fewer cards than fit
+     in a fixed 1fr slot; left column fills whatever's left. */
   #dash-counts-cols {
-    display: grid; grid-template-columns: 2fr 1fr; gap: 18px; margin-bottom: 8px;
+    display: grid; grid-template-columns: 1fr auto; gap: 18px; margin-bottom: 8px;
+    align-items: start;
   }
   @media (max-width: 720px) {
     #dash-counts-cols { grid-template-columns: 1fr; }
@@ -2618,60 +3627,6 @@ const PAGE = String.raw`<!DOCTYPE html>
   table.cedit-table td.cedit-coverage span.shadowed {
     color: #b07020; font-weight: 600;
   }
-  table.cedit-table tr.cedit-row-selected { background: var(--accent-bg); }
-  table.cedit-table tr.cedit-row-selected td.cedit-coverage span { color: var(--accent); font-weight: 600; }
-
-  /* Split layout: rule editor on the left, live corpus preview on the right.
-     Filename rules only — content/product hide the right pane. */
-  #cedit-split {
-    height: 100%;
-    display: grid;
-    grid-template-columns: 1fr;  /* default: no pane */
-    overflow: hidden;
-  }
-  #cedit-split.with-corpus { grid-template-columns: 1fr 360px; }
-  #cedit-main-pane {
-    overflow: auto; padding: 24px 32px; min-width: 0;
-  }
-  #cedit-corpus-pane {
-    border-left: 1px solid var(--border);
-    background: var(--inset);
-    display: flex; flex-direction: column;
-    min-width: 0; overflow: hidden;
-  }
-  #cedit-corpus-header {
-    padding: 14px 16px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  #cedit-corpus-title {
-    color: var(--accent); font-weight: 600; font-size: 13px;
-  }
-  #cedit-corpus-sub {
-    color: var(--muted); font-size: 11px; margin-top: 2px;
-  }
-  #cedit-corpus-list {
-    overflow: auto; flex: 1; padding: 4px 0;
-  }
-  .cedit-corpus-item {
-    padding: 5px 16px; font-size: 11px; line-height: 1.3;
-    border-bottom: 1px solid var(--border-row);
-    display: flex; gap: 8px; align-items: baseline;
-  }
-  .cedit-corpus-item:hover { background: var(--hover); }
-  .cedit-corpus-item .name {
-    flex: 1; color: var(--text); white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
-  }
-  .cedit-corpus-item .fix {
-    color: var(--accent); cursor: pointer; font-size: 10px;
-    text-decoration: underline dotted; flex: 0 0 auto;
-  }
-  .cedit-corpus-item .fix:hover { color: var(--text); }
-  .cedit-corpus-item.matched .name { color: var(--accent); font-weight: 500; }
-  .cedit-corpus-item.dimmed { opacity: 0.35; }
-  .cedit-corpus-empty {
-    padding: 24px 16px; color: var(--muted); font-size: 12px; text-align: center;
-  }
 
   table.cedit-table td.cedit-pattern { position: relative; }
   table.cedit-table td.cedit-pattern input {
@@ -2794,8 +3749,11 @@ const PAGE = String.raw`<!DOCTYPE html>
   table.cedit-table td.cedit-actions button.danger:hover { background: var(--danger); color: #fff; }
   table.cedit-table td.cedit-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
 
-  /* Help / welcome page styling. Readable prose, not a data grid. */
-  #help-view { max-width: 760px; }
+  /* Home/Dashboard view styling. The original max-width was for prose;
+     we moved help to its own page (/help.html), so #help-view is now
+     dashboard-only and should fill the full available width — otherwise
+     the scrollbar sits mid-page with empty gutter to its right. */
+  /* #help-view max-width removed intentionally. */
   #help-view .help-h {
     color: var(--accent); margin: 24px 0 8px 0; font-size: 17px;
   }
@@ -2815,107 +3773,112 @@ const PAGE = String.raw`<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>EnLogosGRAG</h1>
-  <span class="meta" id="status">loading…</span>
+  <h1 id="brand" title="Go to the All-documents dashboard" style="cursor: pointer;">EnLogosGRAG</h1>
+  <span id="sdt-control" title="UI filter: which source-data-type's rules and editor view are active. Every file is always classified by its own type's rules; this is just what you SEE.">
+    <label class="meta" for="sdt-switcher" style="margin-right:6px;">Source Data Type Filter</label>
+    <select id="sdt-switcher">
+      <option value="Vendor">Vendor</option>
+      <option value="JobFiles">JobFiles</option>
+      <option value="Sales">Sales</option>
+      <option value="Any">Any</option>
+      <option value="All">No filter (show all)</option>
+    </select>
+  </span>
   <span class="spacer"></span>
   <a class="help-link" href="/help" target="_blank" rel="noopener">Help</a>
 </header>
 <main>
   <aside id="sidebar">
+    <div id="sidebar-resizer" title="Drag to resize sidebar"></div>
     <button id="sidebar-toggle" type="button" title="Collapse sidebar">‹</button>
-    <div id="help-row" class="table-row" data-view="help">
-      <span>🏠 Home</span>
-    </div>
+    <div id="sidebar-nav">
     <details>
-      <summary>Reports</summary>
-      <div id="charts-row" class="table-row" data-view="charts">
-        <span>📊 All documents</span>
-      </div>
-      <div class="chart-preset" data-preset="classified">
-        <span>↳ Classified only</span>
-      </div>
-      <div class="chart-preset" data-preset="unclassified">
-        <span>↳ Unclassified only</span>
-      </div>
-      <div class="chart-preset" data-preset="pdfs">
-        <span>↳ PDFs only</span>
-      </div>
-      <div class="chart-preset" data-preset="classified-pdfs">
-        <span>↳ Classified PDFs only</span>
-      </div>
-      <div class="chart-preset" data-preset="unclassified-pdfs">
-        <span>↳ Unclassified PDFs only</span>
-      </div>
-      <div class="chart-preset" data-preset="with-products">
-        <span>↳ Documents with products</span>
-      </div>
-      <div class="chart-preset" data-preset="without-products">
-        <span>↳ Documents without products</span>
-      </div>
-      <div id="duplicates-row" class="table-row" data-view="duplicates">
-        <span>🧬 Duplicates</span>
-      </div>
-    </details>
+      <summary>Inputs</summary>
 
-    <details>
-      <summary>Classifiers</summary>
-      <div id="classifier-row-filename" class="table-row" data-classifier="filename">
-        <span>📝 Filename rules</span>
-      </div>
-      <div id="classifier-row-content" class="table-row" data-classifier="content">
-        <span>📄 Content rules</span>
-      </div>
-      <div id="classifier-row-product" class="table-row" data-classifier="product">
-        <span>🏷️ Product rules</span>
-      </div>
-    </details>
-
-    <details>
-      <summary>Ephemeral tables</summary>
-      <div id="table-list"></div>
-    </details>
-
-    <details>
-      <summary>Source data</summary>
-      <div id="listing-display">
-        <div id="listing-display-empty" class="listing-empty">No folder chosen.</div>
-        <div id="listing-display-set" class="listing-set" style="display:none;">
-          <div class="listing-name" id="listing-name"></div>
-          <div class="listing-path" id="listing-path"></div>
+      <details>
+        <summary class="sub-summary">Source</summary>
+        <div id="sdt-sidebar-banner" class="sdt-pill" title="Active source-data-type — change in the header"></div>
+        <div id="listing-display">
+          <div id="listing-display-empty" class="listing-empty">No folder chosen.</div>
+          <div id="listing-display-set" class="listing-set" style="display:none;">
+            <div class="listing-name" id="listing-name"></div>
+            <div class="listing-path" id="listing-path"></div>
+          </div>
         </div>
-      </div>
-      <button id="pick-listing" class="secondary">Choose folder…</button>
-      <button id="rescan-listing" class="secondary">Rescan listing (regenerate basic_listing.txt)</button>
-      <h2 style="margin-top: 16px;">Canonical tables</h2>
-      <table class="sidebar-summary">
-        <tbody>
-          <tr id="doctypes-row" data-table="document_types">
-            <td>📚 Document types</td>
-            <td class="count" id="doctypes-count">0</td>
-          </tr>
-          <tr id="ignored-row" data-view="ignored">
-            <td>🚫 Ignored types</td>
-            <td class="count" id="ignored-types-count">0</td>
-          </tr>
-          <tr id="ignored-folders-row" data-view="ignored-folders">
-            <td>📁 Ignored folders</td>
-            <td class="count" id="ignored-folders-count">0</td>
-          </tr>
-          <tr id="ignored-files-row" data-view="ignored-files">
-            <td>📄 Ignored files</td>
-            <td class="count" id="ignored-files-count">0</td>
-          </tr>
-        </tbody>
-      </table>
+        <button id="pick-listing" class="secondary">Choose folder…</button>
+        <button id="rescan-listing" class="secondary">Rescan listing (regenerate basic_listing.txt)</button>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Rules</summary>
+
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Type Classifiers</summary>
+          <div id="classifier-row-content" class="table-row" data-classifier="content">
+            <span>Content rules</span>
+          </div>
+          <div id="classifier-row-filename" class="table-row" data-classifier="filename">
+            <span>Filename rules</span>
+          </div>
+        </details>
+
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Vendor</summary>
+          <div id="classifier-row-vendor_file" class="table-row" data-classifier="vendor_file">
+            <span>Vendor file extractor</span>
+          </div>
+          <div id="classifier-row-vendor_content" class="table-row" data-classifier="vendor_content">
+            <span>Vendor content extractor</span>
+          </div>
+        </details>
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Product</summary>
+          <div id="classifier-row-product_file" class="table-row" data-classifier="product_file">
+            <span>Product file extractor</span>
+          </div>
+          <div id="classifier-row-product_content" class="table-row" data-classifier="product_content">
+            <span>Product content extractor</span>
+          </div>
+        </details>
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Building</summary>
+          <div id="classifier-row-building_file" class="table-row" data-classifier="building_file">
+            <span>Building file extractor</span>
+          </div>
+          <div id="classifier-row-building_content" class="table-row" data-classifier="building_content">
+            <span>Building content extractor</span>
+          </div>
+        </details>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Canonical</summary>
+        <div class="table-list">
+          <div id="building-addresses-row" class="table-row" data-table="building_addresses">
+            <span>Building addresses</span><span class="count" id="building-addresses-count">0</span>
+          </div>
+          <div id="canonical-buildings-row" class="table-row" data-table="canonical_buildings">
+            <span>Canonical buildings</span><span class="count" id="canonical-buildings-count">0</span>
+          </div>
+          <div id="doctypes-row" class="table-row" data-table="document_types">
+            <span>Document types</span><span class="count" id="doctypes-count">0</span>
+          </div>
+        </div>
+      </details>
     </details>
 
     <details>
       <summary>Actions</summary>
       <details class="action-sub">
         <summary>Purge</summary>
-        <div class="action-row danger" data-action="purge-all">Purge ALL tables</div>
-        <div class="action-row danger" data-action="purge-vendors">Purge vendors</div>
-        <div class="action-row danger" data-action="purge-files">Purge files</div>
+        <div class="action-row danger" data-action="purge-all">
+          Purge ephemeral tables
+          <span class="desc">Clears 8 tables: vendors, files, documents, document_extracts, products, document_products, buildings, document_buildings. Canonical tables (canonical_buildings, building_addresses, ignored_*) preserved.</span>
+        </div>
+        <div class="action-row danger" data-action="purge-hashes">
+          Purge hashes
+          <span class="desc">Clear documents.sha256 (sidecars on disk preserved)</span>
+        </div>
         <div class="action-row danger" data-action="purge-text-backups">
           Purge text backups
           <span class="desc">Delete the &lt;Vendors&gt;_text filesystem cache</span>
@@ -2925,7 +3888,10 @@ const PAGE = String.raw`<!DOCTYPE html>
         <summary>Full Process</summary>
         <div class="action-row headline" data-action="run-full-process">
           Run Full Process
-          <span class="desc">Vendors + files + hash + dedup + classify + extract + content classify + products</span>
+          <!-- Description text is rewritten by applyActiveSdtToUi() so the
+               step list reflects which entity extractors will actually
+               fire for the currently-selected SDT. -->
+          <span class="desc" id="full-process-desc"></span>
         </div>
       </details>
       <details class="action-sub">
@@ -2934,8 +3900,19 @@ const PAGE = String.raw`<!DOCTYPE html>
           <input type="checkbox" id="use-ignores" checked>
           <span>Apply ignore lists</span>
         </label>
-        <div class="action-row" data-action="run-vendors">Ingest Vendors</div>
         <div class="action-row" data-action="run-files">Ingest Files</div>
+        <div class="action-row" data-action="hash-start">
+          Hash files (sha256)
+          <span class="desc">Background; non-ignored files only; only-missing</span>
+        </div>
+        <div class="action-row" data-action="find-duplicates">
+          Find duplicates
+          <span class="desc">Reports docs sharing a sha256</span>
+        </div>
+        <div class="action-row" data-action="extract-start">
+          Convert to text
+          <span class="desc">PDF + Word (.docx) → plain text; background; uses filesystem cache when present</span>
+        </div>
       </details>
       <details class="action-sub">
         <summary>Classify</summary>
@@ -2950,42 +3927,195 @@ const PAGE = String.raw`<!DOCTYPE html>
       </details>
       <details class="action-sub">
         <summary>Extract</summary>
-        <div class="action-row" data-action="extract-start">
-          Extract PDF text
-          <span class="desc">Background; uses filesystem cache when present</span>
-        </div>
-        <div class="action-row" data-action="extract-stop">
-          Stop extraction
-          <span class="desc">Signals the worker to stop after current file</span>
-        </div>
-        <div class="action-row" data-action="classify-products">
-          Extract products
-          <span class="desc">Vendor-scoped rules; many-to-many to documents</span>
-        </div>
-        <div class="action-row" data-action="hash-start">
-          Hash files (sha256)
-          <span class="desc">Background; non-ignored files only; only-missing</span>
-        </div>
-        <div class="action-row" data-action="hash-stop">
-          Stop hashing
-          <span class="desc">Signals the worker to stop after current file</span>
-        </div>
-        <div class="action-row" data-action="find-duplicates">
-          Find duplicates
-          <span class="desc">Reports docs sharing a sha256</span>
-        </div>
+        <details class="extractor-sub">
+          <summary>Vendor extractor</summary>
+          <div class="action-row" data-action="extract-vendors-all">
+            Run All
+            <span class="desc">Vendor SDT only; both filename/path and content rules</span>
+          </div>
+          <div class="action-row" data-action="extract-vendors-file">
+            Run File Extractor
+            <span class="desc">Only filename / path rules (match: name | path)</span>
+          </div>
+          <div class="action-row" data-action="extract-vendors-content">
+            Run Content Extractor
+            <span class="desc">Only content rules (match: first_page | extract); needs extracted text</span>
+          </div>
+        </details>
+        <details class="extractor-sub">
+          <summary>Product extractor</summary>
+          <div class="action-row" data-action="extract-products-all">
+            Run All
+            <span class="desc">Vendor-scoped rules; both filename/path and content signals</span>
+          </div>
+          <div class="action-row" data-action="extract-products-file">
+            Run File Extractor
+            <span class="desc">Only filename / path rules (match: name | path)</span>
+          </div>
+          <div class="action-row" data-action="extract-products-content">
+            Run Content Extractor
+            <span class="desc">Only content rules (match: first_page | extract); needs extracted text</span>
+          </div>
+        </details>
+        <details class="extractor-sub">
+          <summary>Building extractor</summary>
+          <div class="action-row" data-action="buildings-snapshot">
+            Snapshot from Snowflake
+            <span class="desc">Refresh canonical_buildings + building_addresses</span>
+          </div>
+          <div class="action-row" data-action="extract-buildings-all">
+            Run All
+            <span class="desc">JobFiles only; reads filename + extract text</span>
+          </div>
+          <div class="action-row" data-action="extract-buildings-file">
+            Run File Extractor
+            <span class="desc">Filename / path tokens only</span>
+          </div>
+          <div class="action-row" data-action="extract-buildings-content">
+            Run Content Extractor
+            <span class="desc">Extract-text tokens only; needs extracted text</span>
+          </div>
+          <div id="action-row-buildings-match-stop" class="action-row disabled" data-action="buildings-match-stop" title="No building match running">
+            Stop matching
+            <span class="desc">Signals the worker to stop after current file</span>
+          </div>
+        </details>
       </details>
     </details>
 
     <details>
-      <summary>Status</summary>
+      <summary>Results</summary>
+
+      <details>
+        <summary class="sub-summary">Dashboards</summary>
+        <div id="help-row" class="table-row" data-view="help" data-sdt="">
+          <span>All documents</span>
+        </div>
+        <div id="dashboard-row-jobfiles" class="table-row" data-view="help" data-sdt="JobFiles">
+          <span>JobFiles</span>
+        </div>
+        <div id="dashboard-row-vendor" class="table-row" data-view="help" data-sdt="Vendor">
+          <span>Vendor</span>
+        </div>
+        <div id="dashboard-row-sales" class="table-row" data-view="help" data-sdt="Sales">
+          <span>Sales</span>
+        </div>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Charts</summary>
+
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Classification</summary>
+          <div id="charts-row" class="table-row" data-view="charts">
+            <span>All documents</span>
+          </div>
+          <div class="chart-preset" data-preset="classified">
+            <span>Classified only</span>
+          </div>
+          <div class="chart-preset" data-preset="with-products">
+            <span>Documents with products</span>
+          </div>
+          <div class="chart-preset" data-preset="without-products">
+            <span>Documents without products</span>
+          </div>
+          <div class="chart-preset" data-preset="unclassified">
+            <span>Unclassified only</span>
+          </div>
+        </details>
+
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Filetype</summary>
+          <div class="chart-preset" data-preset="ft-all">
+            <span>All filetypes</span>
+          </div>
+          <div class="chart-preset" data-preset="drawings">
+            <span>Drawings (.dwg / .dxf)</span>
+          </div>
+          <div class="chart-preset" data-preset="images">
+            <span>Images (.jpg / .jpeg / .png / .heic)</span>
+          </div>
+          <div class="chart-preset" data-preset="office">
+            <span>Office docs (.doc / .docx / .xls / .xlsx)</span>
+          </div>
+          <div class="chart-preset" data-preset="pdfs">
+            <span>PDFs</span>
+          </div>
+        </details>
+
+        <details class="chart-folder">
+          <summary class="chart-folder-summary">Source Data Type</summary>
+          <div class="chart-preset" data-preset="sdt-all">
+            <span>All SDTs</span>
+          </div>
+          <div class="chart-preset" data-preset="sdt-jobfiles">
+            <span>JobFiles</span>
+          </div>
+          <div class="chart-preset" data-preset="sdt-vendor">
+            <span>Vendor</span>
+          </div>
+          <div class="chart-preset" data-preset="sdt-sales">
+            <span>Sales</span>
+          </div>
+        </details>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Reports</summary>
+        <div id="report-row-classification-all" class="table-row" data-view="report-classification" data-sdt="">
+          <span>Classification — all documents</span>
+        </div>
+        <div id="report-row-classification-vendor" class="table-row" data-view="report-classification" data-sdt="Vendor">
+          <span>Classification — Vendor</span>
+        </div>
+        <div id="report-row-classification-jobfiles" class="table-row" data-view="report-classification" data-sdt="JobFiles">
+          <span>Classification — JobFiles</span>
+        </div>
+        <div id="report-row-classification-sales" class="table-row" data-view="report-classification" data-sdt="Sales">
+          <span>Classification — Sales</span>
+        </div>
+        <div id="duplicates-row" class="table-row" data-view="duplicates">
+          <span>Find duplicates</span>
+        </div>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Ignored</summary>
+        <div class="table-list">
+          <div id="ignored-buildings-row" class="table-row" data-table="ignored_buildings">
+            <span>Ignored buildings</span><span class="count" id="ignored-buildings-count">0</span>
+          </div>
+          <div id="ignored-files-row" class="table-row" data-view="ignored-files">
+            <span>Ignored files</span><span class="count" id="ignored-files-count">0</span>
+          </div>
+          <div id="ignored-folders-row" class="table-row" data-view="ignored-folders">
+            <span>Ignored folders</span><span class="count" id="ignored-folders-count">0</span>
+          </div>
+          <div id="ignored-row" class="table-row" data-view="ignored">
+            <span>Ignored types</span><span class="count" id="ignored-types-count">0</span>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary class="sub-summary">Ephemeral</summary>
+        <div id="table-list"></div>
+      </details>
+    </details>
+
+    </div>
+    <div id="sidebar-status">
+      <div id="sidebar-status-header">Status</div>
+      <div id="sdt-status-banner" class="sdt-pill" title="Active source-data-type — change in the header"></div>
       <button id="refresh" class="secondary">Refresh status</button>
       <div id="classify-status" class="extract-status">Classified: …</div>
-      <div id="extract-status" class="extract-status">Extracted: …</div>
-      <button id="extract-stop" class="secondary" style="display:none; margin-top: 4px;">Stop extraction</button>
-      <div id="hash-status" class="extract-status">Hashed: …</div>
-      <button id="hash-stop" class="secondary" style="display:none; margin-top: 4px;">Stop hashing</button>
-    </details>
+      <!-- Single dynamic worker bar. The label rotates by which worker
+           is currently running (extract / hash / buildings); when idle,
+           shows the most-recent corpus snapshot. The Stop button binds
+           to the active worker via worker-stop.dataset.worker. -->
+      <div id="worker-progress" class="extract-status">Idle</div>
+      <button id="worker-stop" class="secondary" style="display:none; margin-top: 4px;" data-worker="">Stop</button>
+    </div>
   </aside>
   <section class="content">
     <div class="toolbar">
@@ -3007,12 +4137,20 @@ const PAGE = String.raw`<!DOCTYPE html>
         <option value="classified">Classified only</option>
         <option value="unclassified">Unclassified only</option>
       </select>
-      <select id="confidence-filter" class="docs-only" title="Minimum confidence threshold (excludes unclassified for any threshold above 'all')">
-        <option value="all">Any confidence</option>
-        <option value="low">≥ low</option>
-        <option value="medium">≥ medium</option>
-        <option value="high">high only</option>
+      <select id="sdt-filter" class="ext-only" title="Filter by Source Data Type (Vendor / JobFiles / Sales / unstamped). 'All' shows every SDT.">
+        <option value="">All SDTs</option>
+        <option value="Vendor">Vendor</option>
+        <option value="JobFiles">JobFiles</option>
+        <option value="Sales">Sales</option>
+        <option value="Any">Any</option>
+        <option value="(none)">(unstamped)</option>
       </select>
+      <div id="columns-wrap" class="multi-dropdown docs-only" style="position: relative;">
+        <button type="button" id="columns-btn" class="multi-btn" title="Show or hide columns in this table">
+          <span id="columns-label">Columns</span> <span class="caret">▾</span>
+        </button>
+        <div id="columns-panel" class="multi-panel" style="display:none;"></div>
+      </div>
       <select id="ignored-filter" class="files-only" title="Files in scope (active = has a documents row) vs ignored (extension on the ignore list at last ingest)">
         <option value="all">All files</option>
         <option value="active">Active only</option>
@@ -3027,7 +4165,7 @@ const PAGE = String.raw`<!DOCTYPE html>
     </div>
     <div id="help-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
       <div id="dashboard">
-        <h2 class="dash-h">Dashboard</h2>
+        <h2 class="dash-h" id="dash-title">Dashboard</h2>
         <p class="dash-sub" id="dash-empty" style="display:none;">No data yet. Run an ingest to populate the database.</p>
 
         <h3 class="dash-h">KPIs</h3>
@@ -3075,6 +4213,28 @@ const PAGE = String.raw`<!DOCTYPE html>
         Loading…
       </p>
       <div id="duplicates-body"></div>
+    </div>
+    <!-- Classification report — the bottom half of the home dashboard
+         pulled out into a focused view. Three entries in the sidebar
+         (all / Vendor / JobFiles) feed the same template; SDT scope is
+         held on state.reportSdt and used for the /api/dashboard fetch. -->
+    <div id="report-classification-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <h2 class="dash-h" id="report-classification-title" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Classification by document type</h2>
+      <div id="report-class-summary" style="color: var(--text); margin: 0 0 8px 0;">…</div>
+      <p class="dash-sub">% of classified shows each type's share of the classified corpus. High/Medium/Low show the confidence mix within that type (each row sums to 100%). Unclassified documents have no type and don't appear here.</p>
+      <table class="dash-table" id="report-class-types-table">
+        <thead>
+          <tr>
+            <th>Document type</th>
+            <th>Count</th>
+            <th>% of classified</th>
+            <th>High</th>
+            <th>Medium</th>
+            <th>Low</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
     <div id="ignored-view" style="display:none; flex:1; overflow:auto; padding:24px 32px; max-width: 760px;">
       <h2 class="dash-h" style="color: var(--accent); margin: 0 0 8px 0; font-size: 22px;">Ignored file types</h2>
@@ -3167,44 +4327,48 @@ const PAGE = String.raw`<!DOCTYPE html>
         </tbody>
       </table>
     </div>
-    <div id="classifier-editor-view" style="display:none; flex:1; overflow:hidden; padding:0;">
-      <div id="cedit-split">
-        <div id="cedit-main-pane">
-          <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
-            <h2 id="cedit-title" style="color: var(--accent); margin: 0; font-size: 22px;">Filename rules</h2>
-            <div style="font-size:12px; color:var(--muted);" id="cedit-meta">…</div>
-          </div>
-          <p class="dash-sub" id="cedit-desc" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">…</p>
+    <div id="classifier-editor-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
+        <h2 id="cedit-title" style="color: var(--accent); margin: 0; font-size: 22px;">Filename rules</h2>
+        <div style="font-size:12px; color:var(--muted);" id="cedit-meta">…</div>
+      </div>
+      <p class="dash-sub" id="cedit-desc" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">…</p>
 
-          <div id="cedit-error" style="display:none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; white-space: pre-wrap;"></div>
+      <div id="cedit-sdt-reminder" class="sdt-pill" style="display:none; margin: 0 0 12px 0; text-align: left; padding: 6px 10px;"></div>
 
-          <div style="display:flex; gap:8px; align-items:center; margin-bottom: 14px;">
-            <button id="cedit-save"    class="secondary" style="padding: 5px 14px;" disabled>Save changes</button>
-            <button id="cedit-discard" class="secondary" style="padding: 5px 14px;" disabled>Discard</button>
-            <span id="cedit-dirty" style="color: var(--muted); font-size: 12px;"></span>
-            <span id="cedit-group-controls" style="margin-left:auto; display:none;">
-              <button id="cedit-expand-all"   class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Expand all</button>
-              <button id="cedit-collapse-all" class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Collapse all</button>
-            </span>
-            <button id="cedit-corpus-toggle" class="secondary" style="margin-left:auto; padding: 5px 10px; font-size: 12px; display:none;" type="button" title="Toggle the corpus preview pane">
-              ◑ Corpus pane
-            </button>
-          </div>
+      <div id="cedit-error" style="display:none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; white-space: pre-wrap;"></div>
 
-          <table class="cedit-table" id="cedit-table">
-            <thead><tr id="cedit-thead-row"></tr></thead>
-            <tbody></tbody>
-          </table>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom: 14px;">
+        <button id="cedit-save"    class="secondary" style="padding: 5px 14px;" disabled>Save changes</button>
+        <button id="cedit-discard" class="secondary" style="padding: 5px 14px;" disabled>Discard</button>
+        <span id="cedit-dirty" style="color: var(--muted); font-size: 12px;"></span>
+        <span id="cedit-group-controls" style="margin-left:auto; display:none;">
+          <button id="cedit-expand-all"   class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Expand all</button>
+          <button id="cedit-collapse-all" class="secondary" style="padding: 5px 10px; font-size: 12px;" type="button">Collapse all</button>
+        </span>
+      </div>
 
-          <button id="cedit-add" class="secondary" style="margin-top: 12px; padding: 5px 14px;">+ Add rule</button>
-        </div>
-        <div id="cedit-corpus-pane" style="display:none;">
-          <div id="cedit-corpus-header">
-            <div id="cedit-corpus-title">Corpus preview</div>
-            <div id="cedit-corpus-sub">Click a rule's match count to filter</div>
-          </div>
-          <div id="cedit-corpus-list"></div>
-        </div>
+      <table class="cedit-table" id="cedit-table">
+        <thead><tr id="cedit-thead-row"></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <button id="cedit-add" class="secondary" style="margin-top: 12px; padding: 5px 14px;">+ Add rule</button>
+    </div>
+    <div id="building-extractor-view" style="display:none; flex:1; overflow:auto; padding:24px 32px;">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom: 8px;">
+        <h2 style="color: var(--accent); margin: 0; font-size: 22px;">Building Extractor</h2>
+        <div style="font-size:12px; color:var(--muted);">stub · not yet wired</div>
+      </div>
+      <p class="dash-sub" style="color: var(--muted); font-size: 12px; margin: 0 0 14px 0;">
+        Entity extraction rules that match buildings in document filenames and content. Buildings are matched against the canonical Buildings table, which is sourced from Snowflake. The extractor is currently driven by the snapshot + match jobs in the Actions panel; rule-driven extraction will live here.
+      </p>
+      <div style="background: var(--inset); border: 1px solid var(--border); border-radius: 2px; padding: 14px;">
+        <div style="font-size: 12px; color: var(--text); margin-bottom: 6px; font-weight: 500;">Today this is run from Actions → Buildings:</div>
+        <ul style="margin: 0 0 0 18px; padding: 0; font-size: 12px; color: var(--muted); line-height: 1.7;">
+          <li>Snapshot from Snowflake — refresh local copy of BUILDING_CANONICAL + xref</li>
+          <li>Match documents → buildings — JobFiles only; uses NAMES_SAMPLE + raw addresses</li>
+        </ul>
       </div>
     </div>
     <div id="chart-view" style="display:none; flex:1; overflow:auto; padding:14px;">
@@ -3221,6 +4385,10 @@ const PAGE = String.raw`<!DOCTYPE html>
         <div class="chart-card" id="card-classified">
           <h3>Classified vs. unclassified</h3>
           <div class="chart-box"><canvas id="chart-classified"></canvas></div>
+        </div>
+        <div class="chart-card" id="card-sdt">
+          <h3>By Source Data Type</h3>
+          <div class="chart-box"><canvas id="chart-sdt"></canvas></div>
         </div>
         <div class="chart-card" id="card-confidence">
           <h3>By confidence</h3>
@@ -3253,6 +4421,14 @@ const PAGE = String.raw`<!DOCTYPE html>
         <div class="chart-card" id="card-products-vendor">
           <h3>Products discovered per vendor</h3>
           <div class="chart-box"><canvas id="chart-products-vendor"></canvas></div>
+        </div>
+        <div class="chart-card" id="card-building-coverage">
+          <h3>Documents with buildings</h3>
+          <div class="chart-box"><canvas id="chart-building-coverage"></canvas></div>
+        </div>
+        <div class="chart-card" id="card-buildings-top">
+          <h3>By building (top 20)</h3>
+          <div class="chart-box"><canvas id="chart-buildings-top"></canvas></div>
         </div>
       </div>
     </div>
@@ -3328,6 +4504,17 @@ const state = {
   table: "vendors",
   offset: 0,
   listingPath: "",        // absolute path to a listing .txt file on disk
+  // Active source-data-type. UI-level filter only — every file is ALWAYS
+  // classified using rules matching its own source_data_type. This just
+  // controls what the user sees in the editor / status text. Persisted in
+  // localStorage under SDT_KEY. Initialized below in the boot section.
+  activeSdt: "Vendor",
+  // Active dashboard scope: "" (all docs), "Vendor", "JobFiles", or "Any".
+  // Set by clicking a dashboard row in the Reports → Dashboards group.
+  dashboardSdt: "",
+  // Active Classification report scope (Results → Reports → Classification).
+  // Same shape as dashboardSdt: "" / "Vendor" / "JobFiles".
+  reportSdt: "",
 
   limit: 100,
   filter: "",
@@ -3338,6 +4525,9 @@ const state = {
   documentTypeFilters: [],  // multi-select: ['installation_manual', …]
   productFilter: "",        // single-select: 'NFS2-3030' (chart drilldown)
   hasProductFilter: "",     // 'yes' | 'no' | '' — chart drilldown only
+  sdtFilter: "",            // 'Vendor' | 'JobFiles' | 'Any' | '(none)' | ''
+  buildingFilter: "",       // a buildings.id (chart drilldown)
+  hasBuildingFilter: "",    // 'yes' | 'no' | '' (chart drilldown)
   ignoredFilter: "all",     // 'all' | 'active' | 'ignored' — files table only
   // Per-table sort: column name + direction. Reset when switching tables.
   sortColumn: "",
@@ -3352,6 +4542,9 @@ const state = {
     documentTypeFilters: [],
     productFilter: "",
     hasProductFilter: "",
+    sdtFilter: "",
+    buildingFilter: "",
+    hasBuildingFilter: "",
   },
 };
 
@@ -3363,13 +4556,57 @@ async function api(path, body) {
   return res.json();
 }
 
+// Log entries are persisted to localStorage as a 50-entry ring buffer so
+// they survive page reloads. The most recent entry is at index 0 (matches
+// the on-screen order, which inserts at firstChild). Each entry is
+//   { t: "HH:MM:SS", msg, kind }
+// Replayed entries get a "replayed" CSS class at restore time so we
+// visually de-emphasize them with a thin left border.
+const LOG_KEY  = "enlogosgrag.log";
+const LOG_KEEP = 50;
+function persistLogEntry(entry) {
+  let buf;
+  try {
+    const raw = localStorage.getItem(LOG_KEY);
+    buf = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(buf)) buf = [];
+  } catch { buf = []; }
+  buf.unshift(entry);
+  if (buf.length > LOG_KEEP) buf.length = LOG_KEEP;
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(buf)); } catch { /* full quota — drop */ }
+}
+
 function log(msg, kind = "info") {
   const el = document.getElementById("log");
+  const t = new Date().toTimeString().slice(0, 8);
   const e = document.createElement("div");
   e.className = "entry " + kind;
-  const t = new Date().toTimeString().slice(0, 8);
   e.textContent = "[" + t + "] " + msg;
   el.insertBefore(e, el.firstChild);
+  persistLogEntry({ t, msg, kind });
+}
+
+// Replay the persisted ring buffer at boot. Entries get a "replayed"
+// class so the user can tell at a glance which lines are from the
+// previous session.
+function restoreLog() {
+  const el = document.getElementById("log");
+  if (!el) return;
+  let buf;
+  try {
+    const raw = localStorage.getItem(LOG_KEY);
+    buf = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(buf)) buf = [];
+  } catch { return; }
+  // The buffer is newest-first; rendering newest-first too means we
+  // append in order (instead of prepending each, which would reverse).
+  for (const entry of buf) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = document.createElement("div");
+    e.className = "entry replayed " + (entry.kind || "info");
+    e.textContent = "[" + (entry.t || "??:??:??") + "] " + (entry.msg || "");
+    el.appendChild(e);
+  }
 }
 
 function setActiveTable(name) {
@@ -3384,12 +4621,15 @@ function setActiveTable(name) {
   state.documentTypeFilters = [];
   state.productFilter = "";
   state.hasProductFilter = "";
+  state.sdtFilter = "";
+  state.buildingFilter = "";
+  state.hasBuildingFilter = "";
   state.sortColumn = "";
   state.sortDir = "asc";
   state.ignoredFilter = "all";
   document.getElementById("filter").value = "";
   document.getElementById("classified-filter").value = "all";
-  document.getElementById("confidence-filter").value = "all";
+  document.getElementById("sdt-filter").value = "";
   document.getElementById("ignored-filter").value = "all";
   refreshMultiButton("filetype");
   refreshMultiButton("doctype");
@@ -3436,6 +4676,9 @@ function setActiveCharts(preset) {
     documentTypeFilters: [],
     productFilter: "",
     hasProductFilter: "",
+    sdtFilter: "",
+    buildingFilter: "",
+    hasBuildingFilter: "",
   };
   if (preset && typeof preset === "object") {
     Object.assign(state.chartFilter, preset);
@@ -3456,13 +4699,25 @@ function setActiveCharts(preset) {
 // starting filter chain. Defined here so the wiring at the bottom of
 // the file stays declarative.
 const CHART_PRESETS = {
+  // Classification folder
   classified:           { classifiedFilter: "classified" },
   unclassified:         { classifiedFilter: "unclassified" },
-  pdfs:                 { fileTypeFilters: [".pdf"] },
-  "classified-pdfs":    { classifiedFilter: "classified",   fileTypeFilters: [".pdf"] },
-  "unclassified-pdfs":  { classifiedFilter: "unclassified", fileTypeFilters: [".pdf"] },
   "with-products":      { hasProductFilter: "yes" },
   "without-products":   { hasProductFilter: "no" },
+  // Source Data Type folder. "sdt-all" is intentionally an empty filter —
+  // clicking it shows the corpus-wide chart (same as the Classification
+  // folder's All documents); we still expose it as a labelled entry so
+  // the folder has a clear "show everything" anchor.
+  "sdt-all":            {},
+  "sdt-vendor":         { sdtFilter: "Vendor" },
+  "sdt-jobfiles":       { sdtFilter: "JobFiles" },
+  "sdt-sales":          { sdtFilter: "Sales" },
+  // Filetype folder
+  "ft-all":             {},
+  pdfs:                 { fileTypeFilters: [".pdf"] },
+  drawings:             { fileTypeFilters: [".dwg", ".dxf"] },
+  office:               { fileTypeFilters: [".doc", ".docx", ".xls", ".xlsx"] },
+  images:               { fileTypeFilters: [".jpg", ".jpeg", ".png", ".heic"] },
 };
 
 function hideAllViews() {
@@ -3474,8 +4729,36 @@ function hideAllViews() {
   document.getElementById("classifier-editor-view").style.display  = "none";
   const dv = document.getElementById("duplicates-view");
   if (dv) dv.style.display = "none";
+  const rcv = document.getElementById("report-classification-view");
+  if (rcv) rcv.style.display = "none";
   const ifv = document.getElementById("ignored-files-view");
   if (ifv) ifv.style.display = "none";
+  const bev = document.getElementById("building-extractor-view");
+  if (bev) bev.style.display = "none";
+  // Always stop chart polling when leaving — startChartPolling() is called
+  // from showChartView when the user enters charts.
+  stopChartPolling();
+}
+
+// Refresh the chart view's data on a timer so it reflects ongoing work
+// (a classify run, a content classify, etc.). Stops when user leaves
+// the charts view. 2s cadence is cheap — /api/stats is a single SQL pass.
+let chartPollTimer = null;
+function startChartPolling() {
+  if (chartPollTimer) return;
+  chartPollTimer = setInterval(() => {
+    if (state.view !== "charts") { stopChartPolling(); return; }
+    loadCharts();
+  }, 2000);
+}
+function stopChartPolling() {
+  if (chartPollTimer) { clearInterval(chartPollTimer); chartPollTimer = null; }
+}
+// Reload the charts iff the user is currently on the charts view. Used
+// at the end of classify/extract/etc actions so the user doesn't have
+// to wait for the 2s poll tick to see the post-action numbers.
+function refreshChartsIfActive() {
+  if (state.view === "charts") loadCharts();
 }
 
 function showTableView() {
@@ -3497,6 +4780,7 @@ function showChartView() {
     document.getElementById(id).style.display = "none";
   }
   document.getElementById("page-meta").style.display = "none";
+  startChartPolling();
 }
 
 function showHelpView() {
@@ -3527,13 +4811,20 @@ function showIgnoredFoldersView() {
   document.getElementById("page-meta").style.display = "none";
 }
 
-function setActiveHelp() {
+function setActiveHelp(sdt) {
   state.view = "help";
+  // Persist the chosen scope so loadDashboard() and the polling loop keep
+  // hitting the right /api/dashboard?sdt=… endpoint until the user picks a
+  // different one. Empty string = "all docs" (legacy default).
+  state.dashboardSdt = sdt || "";
   document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
     el.classList.remove("active");
   });
-  const helpRow = document.getElementById("help-row");
-  if (helpRow) helpRow.classList.add("active");
+  // Highlight the dashboard row that matches the chosen scope.
+  const targetRow = document.querySelector(
+    '.table-row[data-view="help"][data-sdt="' + state.dashboardSdt + '"]',
+  );
+  if (targetRow) targetRow.classList.add("active");
   for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
     el.classList.add("hidden");
   }
@@ -3703,6 +4994,115 @@ function setActiveDuplicates() {
   }
   showDuplicatesView();
   loadDuplicates();
+}
+
+// Classification report view — the per-doc-type breakdown lifted out of
+// the home dashboard. sdt is "" / "Vendor" / "JobFiles" so the same
+// /api/dashboard?sdt=… endpoint scopes the table; rendering reuses the
+// dashboard's #report-class-* DOM ids (separate from the home's
+// #dash-class-* ids so both views can coexist).
+function showClassificationReportView() {
+  hideAllViews();
+  document.getElementById("report-classification-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
+}
+
+function setActiveClassificationReport(sdt) {
+  state.view = "report-classification";
+  state.reportSdt = sdt || "";
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const targetRow = document.querySelector(
+    '.table-row[data-view="report-classification"][data-sdt="' + state.reportSdt + '"]',
+  );
+  if (targetRow) targetRow.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
+    el.classList.add("hidden");
+  }
+  showClassificationReportView();
+  loadClassificationReport();
+}
+
+async function loadClassificationReport() {
+  const titleEl = document.getElementById("report-classification-title");
+  const summary = document.getElementById("report-class-summary");
+  const tbody   = document.querySelector("#report-class-types-table tbody");
+  if (!titleEl || !summary || !tbody) return;
+  const sdt = state.reportSdt || "";
+  titleEl.textContent = sdt
+    ? "Classification by document type — " + sdt
+    : "Classification by document type";
+
+  let r;
+  try {
+    const url = sdt
+      ? "/api/dashboard?sdt=" + encodeURIComponent(sdt)
+      : "/api/dashboard";
+    r = await fetch(url).then((res) => res.json());
+  } catch (e) {
+    summary.textContent = "Failed to load report: " + (e.message || e);
+    return;
+  }
+  if (!r.ok) {
+    summary.textContent = "Failed to load report: " + (r.error || "unknown");
+    return;
+  }
+
+  const c = r.classification;
+  if (!c || c.totalDocuments === 0) {
+    summary.textContent = "No documents in scope.";
+    tbody.innerHTML = "";
+    return;
+  }
+  summary.innerHTML =
+    '<strong>' + c.classified.toLocaleString() + '</strong> of <strong>' +
+    c.totalDocuments.toLocaleString() + '</strong> documents classified ' +
+    '(' + c.pctClassified.toFixed(1) + '%) — ' +
+    c.unclassified.toLocaleString() + ' remaining.';
+
+  // Per-type table — same shape as the home dashboard's render block but
+  // scoped to this view's tbody.
+  tbody.innerHTML = "";
+  const fmtPct = (p) => (p > 0 ? p.toFixed(1) + '%' : '—');
+  const fmtN   = (n) => (n > 0 ? Number(n).toLocaleString() : '0');
+  for (const t of (r.byType || [])) {
+    const tr = document.createElement("tr");
+    if (t.total === 0) tr.className = "empty-type";
+    tr.innerHTML =
+      '<td>' + t.name + '</td>' +
+      '<td>' + fmtN(t.total) + '</td>' +
+      '<td>' + fmtPct(t.pctOfClassified) + '</td>' +
+      '<td>' + fmtPct(t.pctHigh) + '</td>' +
+      '<td>' + fmtPct(t.pctMedium) + '</td>' +
+      '<td>' + fmtPct(t.pctLow) + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
+function setActiveBuildingExtractor() {
+  if (cedit.kind && ceditIsDirty()) {
+    if (!window.confirm("You have unsaved changes to the " + cedit.kind + " rules. Discard?")) return;
+  }
+  state.view = "building-extractor";
+  cedit.kind = null;
+  document.querySelectorAll(".table-row, .chart-preset, .sidebar-summary tr").forEach((el) => {
+    el.classList.remove("active");
+  });
+  const row = document.getElementById("extractor-row-building");
+  if (row) row.classList.add("active");
+  for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
+    el.classList.add("hidden");
+  }
+  hideAllViews();
+  document.getElementById("building-extractor-view").style.display = "block";
+  for (const id of ["filter", "prev", "next"]) {
+    document.getElementById(id).style.display = "none";
+  }
+  document.getElementById("page-meta").style.display = "none";
 }
 
 async function loadDuplicates() {
@@ -3967,9 +5367,6 @@ const cedit = {
   pristine: [],              // last-saved rule snapshot, deep-cloned
   rules: [],                 // current edit buffer (array of plain objects)
   coverage: null,            // { totalFiles, byId: Map<id, {winning, wouldMatch}> } | null
-  unclassified: null,        // [{ id, name, path }] cached for the corpus pane (3)
-  selectedRuleId: null,      // which rule the corpus preview is filtering by
-  corpusPaneOpen: true,      // (3) split-pane toggle
 };
 
 const CEDIT_KIND_DESC = {
@@ -4036,8 +5433,6 @@ async function loadClassifierRules(kind) {
   cedit.pristine = JSON.parse(JSON.stringify(r.rules));
   cedit.rules    = JSON.parse(JSON.stringify(r.rules));
   cedit.coverage = null;
-  cedit.unclassified = null;
-  cedit.selectedRuleId = null;
   // Switching classifiers resets which vendor groups are expanded.
   ceditOpenVendors.clear();
 
@@ -4049,22 +5444,24 @@ async function loadClassifierRules(kind) {
   const groupCtrls = document.getElementById("cedit-group-controls");
   if (groupCtrls) groupCtrls.style.display = kind === "product" ? "" : "none";
 
-  // The corpus preview pane (right side) is filename-only for v1.
-  const corpusPane = document.getElementById("cedit-corpus-pane");
-  if (corpusPane) corpusPane.style.display = kind === "filename" ? "" : "none";
+  // SDT-scope reminder banner — visible on filename + content editors so
+  // the user remembers the rule list is filtered. Product editor has its
+  // own grouping and gets the same banner for consistency.
+  updateCeditSdtReminder();
 
   renderCeditTable();
   ceditUpdateButtons();
 
-  // Coverage stats — filename rules only for v1. Fire-and-forget; the table
+  // Coverage stats — filename rules only. Fire-and-forget; the table
   // re-renders when the data arrives.
   if (kind === "filename") {
-    loadCoverageAndCorpus();
+    loadCoverage();
   }
 }
 
-async function loadCoverageAndCorpus() {
-  // Coverage stats per rule.
+async function loadCoverage() {
+  // Coverage stats per rule. Best-effort — swallow errors so a coverage
+  // hiccup doesn't take down the editor.
   try {
     const r = await api("/api/classifier-rules/" + cedit.kind + "/coverage");
     if (r.ok) {
@@ -4074,33 +5471,24 @@ async function loadCoverageAndCorpus() {
       renderCeditTable();
     }
   } catch (e) { /* coverage is best-effort, swallow */ }
-
-  // Unclassified files for the corpus preview pane.
-  try {
-    const r = await api("/api/browse", {
-      table: "documents",
-      limit: 500,
-      offset: 0,
-      classifiedFilter: "unclassified",
-    });
-    if (r.ok) {
-      // Reduce to {id, name, path} for the preview.
-      cedit.unclassified = r.rows.map((row) => ({
-        id:   row.doc_id ?? row.id,
-        name: row.name   || row.file_name || "",
-        path: row.path   || row.file_path || "",
-        parent: row.parent || "",
-        file_type: row.file_type || "",
-      }));
-      renderCorpusPreview();
-    }
-  } catch (e) { /* preview is best-effort, swallow */ }
 }
 
 function showCeditError(msg) {
   const el = document.getElementById("cedit-error");
   el.style.display = "block";
   el.textContent = msg;
+}
+
+// True when a rule should be visible given the header source-data-type
+// switcher. Vendor active → Vendor + Any rules; JobFiles active → JobFiles
+// + Any; Any active → everything; All → everything ("no filter").
+// Empty/missing source_data_type on a rule counts as Vendor (back-compat
+// for the original rule files).
+function ruleVisibleForActiveSdt(rule) {
+  const ruleSdt = rule.source_data_type || "Vendor";
+  const active = state.activeSdt || "Vendor";
+  if (active === "Any" || active === "All") return true;
+  return ruleSdt === active || ruleSdt === "Any";
 }
 
 function renderCeditTable() {
@@ -4145,11 +5533,28 @@ function renderCeditTable() {
   // whose vendor matches. Render them grouped under collapsible vendor
   // sections so the list is scannable. Filename/content rules don't have
   // vendor column — keep the flat layout.
-  if (cedit.kind === "product" && cedit.meta.columns.includes("vendor")) {
+  if ((cedit.meta.parent === "product" || cedit.kind === "product")
+      && cedit.meta.columns.includes("vendor")) {
     renderCeditGroupedByVendor(tbody);
   } else {
+    let visibleCount = 0;
     for (let i = 0; i < cedit.rules.length; i++) {
+      if (!ruleVisibleForActiveSdt(cedit.rules[i])) continue;
       tbody.appendChild(renderCeditRow(i));
+      visibleCount++;
+    }
+    // Tell the user the active filter when nothing matches.
+    if (visibleCount === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = cedit.meta.columns.length + 1 + (cedit.kind === "filename" ? 1 : 0);
+      td.style.color = "var(--muted)";
+      td.style.textAlign = "center";
+      td.style.padding = "24px";
+      td.textContent = 'No rules match the active "' + (state.activeSdt || "Vendor") +
+        '" Source Data Type. Switch in the header to see other rules.';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
     }
   }
 }
@@ -4163,16 +5568,30 @@ const ceditOpenVendors = new Set();
 function renderCeditGroupedByVendor(tbody) {
   // Group consecutive rules by vendor while preserving original indices.
   // (Non-consecutive rules with the same vendor become separate groups —
-  // visual cue that something is out of order.)
+  // visual cue that something is out of order.) Filter by active SDT.
   const groups = [];
   let cur = null;
   for (let i = 0; i < cedit.rules.length; i++) {
+    if (!ruleVisibleForActiveSdt(cedit.rules[i])) continue;
     const v = cedit.rules[i].vendor || "(no vendor)";
     if (!cur || cur.vendor !== v) {
       cur = { vendor: v, indices: [] };
       groups.push(cur);
     }
     cur.indices.push(i);
+  }
+  if (groups.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = cedit.meta.columns.length + 1;
+    td.style.color = "var(--muted)";
+    td.style.textAlign = "center";
+    td.style.padding = "24px";
+    td.textContent = 'No rules match the active "' + (state.activeSdt || "Vendor") +
+      '" Source Data Type. Switch in the header to see other rules.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
   }
 
   // Merge contiguous groups for display: aggregate count by vendor name,
@@ -4230,11 +5649,25 @@ function renderCeditRow(i) {
         o.value = v; o.textContent = v;
         input.appendChild(o);
       }
+    } else if (col === "source_data_type") {
+      input = document.createElement("select");
+      // Empty option = back-compat default (Vendor at runtime). Render
+      // explicitly so users can author "leave blank" rules from the YAML.
+      const sdts = cedit.meta.sourceDataTypes || ["Vendor", "JobFiles", "Sales", "Any"];
+      for (const v of sdts) {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = v;
+        input.appendChild(o);
+      }
     } else {
       input = document.createElement("input");
       input.type = "text";
     }
-    input.value = rule[col] != null ? String(rule[col]) : "";
+    // Display value: source_data_type defaults to 'Vendor' when empty, to
+    // mirror runtime behavior. Other columns render their stored value as-is.
+    let displayValue = rule[col] != null ? String(rule[col]) : "";
+    if (col === "source_data_type" && displayValue === "") displayValue = "Vendor";
+    input.value = displayValue;
     input.addEventListener("input", () => {
       rule[col] = input.value;
       ceditUpdateButtons();
@@ -4244,7 +5677,7 @@ function renderCeditRow(i) {
       ceditUpdateButtons();
       // Editing the vendor field changes which group this rule belongs to.
       // Auto-open the new group and re-render so the user can keep editing.
-      if (col === "vendor" && cedit.kind === "product") {
+      if (col === "vendor" && (cedit.meta.parent === "product" || cedit.kind === "product")) {
         ceditOpenVendors.add(input.value || "(no vendor)");
         renderCeditTable();
       }
@@ -4272,8 +5705,7 @@ function renderCeditRow(i) {
     tr.appendChild(td);
   }
   // Coverage column (filename only): "winning / would-match" — diverging
-  // numbers mean the rule is shadowed by an earlier matching rule. Clicking
-  // selects this rule for the corpus preview pane on the right.
+  // numbers mean the rule is shadowed by an earlier matching rule.
   if (cedit.kind === "filename") {
     const tdCov = document.createElement("td");
     tdCov.className = "cedit-coverage";
@@ -4293,13 +5725,6 @@ function renderCeditRow(i) {
         ? w + " docs would match and " + w + " currently win — clean."
         : w + " win, but the regex would match " + m + ". The other " + (m - w) + " are claimed by an earlier rule (shadowed).";
     }
-    tdCov.style.cursor = "pointer";
-    tdCov.addEventListener("click", () => {
-      cedit.selectedRuleId = (cedit.selectedRuleId === rule.id) ? null : rule.id;
-      renderCorpusPreview();
-      renderCeditTable();
-    });
-    if (cedit.selectedRuleId === rule.id) tr.classList.add("cedit-row-selected");
     tr.appendChild(tdCov);
   }
   // Actions column: ↑ ↓ ×
@@ -4340,17 +5765,23 @@ function renderCeditRow(i) {
 }
 
 function ceditAddRule() {
-  // Build a blank rule with sensible defaults.
+  // Build a blank rule with sensible defaults. The new rule's source_data_type
+  // matches the user's active SDT — they're authoring "for the corpus they're
+  // looking at" — except Any-while-active stays Vendor (the conservative default).
   const blank = {};
+  const activeSdt = (state.activeSdt && state.activeSdt !== "Any" && state.activeSdt !== "All")
+    ? state.activeSdt
+    : "Vendor";
   for (const col of cedit.meta.columns) {
-    if (col === "confidence") blank[col] = "medium";
-    else if (col === "match") blank[col] = cedit.meta.matches[0];
-    else blank[col] = "";
+    if (col === "confidence")          blank[col] = "medium";
+    else if (col === "match")          blank[col] = cedit.meta.matches[0];
+    else if (col === "source_data_type") blank[col] = activeSdt;
+    else                               blank[col] = "";
   }
   cedit.rules.push(blank);
   // For grouped (product) view: auto-open the group the new row lands in
   // so it's immediately visible — empty vendor → "(no vendor)" bucket.
-  if (cedit.kind === "product") {
+  if (cedit.meta.parent === "product" || cedit.kind === "product") {
     ceditOpenVendors.add(blank.vendor || "(no vendor)");
   }
   renderCeditTable();
@@ -4374,7 +5805,7 @@ async function ceditSave() {
     meta.textContent = cedit.meta.file + " · " + r.count + " rule" + (r.count === 1 ? "" : "s");
   }
   // Coverage stats reflect the saved YAML; refresh after save (filename only).
-  if (cedit.kind === "filename") loadCoverageAndCorpus();
+  if (cedit.kind === "filename") loadCoverage();
 }
 
 function ceditDiscard() {
@@ -4409,13 +5840,18 @@ async function startFixFromFile({ name, path, currentType }) {
   if (cedit.kind !== "filename") return;
 
   // Append a stub rule with defaults. The user will edit name + pattern;
-  // the regex modal will help with the pattern.
+  // the regex modal will help with the pattern. New rule's source_data_type
+  // = active SDT (or Vendor if "Any" is active — conservative default).
   const blank = {};
+  const activeSdt = (state.activeSdt && state.activeSdt !== "Any" && state.activeSdt !== "All")
+    ? state.activeSdt
+    : "Vendor";
   for (const col of cedit.meta.columns) {
     if (col === "confidence")    blank[col] = "high";
     else if (col === "match")    blank[col] = "name";
     else if (col === "id")       blank[col] = "fix_" + (name.replace(/[^a-z0-9]+/gi, "_").slice(0, 24).toLowerCase() || "new");
     else if (col === "document_type") blank[col] = "";
+    else if (col === "source_data_type") blank[col] = activeSdt;
     else blank[col] = "";
   }
   cedit.rules.push(blank);
@@ -4588,11 +6024,26 @@ async function loadDashboard() {
   const tbody       = document.querySelector("#dash-types-table tbody");
   const summary     = document.getElementById("dash-class-summary");
   const empty       = document.getElementById("dash-empty");
+  const titleEl     = document.getElementById("dash-title");
   if (!ephemeralEl || !canonicalEl || !tbody || !summary) return;
+
+  // Echo the active dashboard scope in the heading. Updated unconditionally
+  // here so toggling between scoped views keeps the title in sync even
+  // before the API responds.
+  if (titleEl) {
+    const sdt = state.dashboardSdt || "";
+    titleEl.textContent = sdt
+      ? "Dashboard — " + sdt
+      : "Dashboard";
+  }
 
   let r;
   try {
-    r = await api("/api/dashboard");
+    const url = state.dashboardSdt
+      ? "/api/dashboard?sdt=" + encodeURIComponent(state.dashboardSdt)
+      : "/api/dashboard";
+    const res = await fetch(url);
+    r = await res.json();
   } catch (e) {
     summary.textContent = "Failed to load dashboard: " + (e.message || e);
     return;
@@ -4600,11 +6051,42 @@ async function loadDashboard() {
 
   // Two columns:
   //   Ephemeral — populated from ingest/classify, wiped on Purge ALL.
-  //   Canonical — taxonomy + user-curated ignore lists, persistent.
-  const CANONICAL = new Set(["document_types"]);
+  //   Canonical — taxonomy + curated reference data, persistent across
+  //               Purge ALL. buildings + building_addresses are sourced
+  //               from Kent's Snowflake (refresh via "Snapshot from
+  //               Snowflake"), not from any local ingest, so they live
+  //               in canonical alongside document_types and the ignore
+  //               lists. document_buildings + buildings are ephemeral
+  //               — those rows come from "Match documents → buildings"
+  //               and are wiped along with files when the corpus is
+  //               purged.
+  // SDT-specific drops:
+  //   JobFiles → hide products / document_products (manufacturer concept)
+  //   Vendor   → hide buildings / building_addresses / document_buildings
+  //              / canonical_buildings / ignored_buildings (entirely a
+  //              JobFiles concept)
+  const CANONICAL = new Set([
+    "document_types",
+    "canonical_buildings",
+    "building_addresses",
+    "ignored_buildings",
+  ]);
+  const PRODUCT_TABLES  = new Set(["products", "document_products"]);
+  const BUILDING_TABLES = new Set([
+    "canonical_buildings", "buildings", "building_addresses",
+    "document_buildings", "ignored_buildings",
+  ]);
+  // JobFiles + Sales share the same shape — both reference buildings/jobs
+  // and never carry products. Vendor is the inverse: products, no buildings.
+  const isJobFilesDashboard = state.dashboardSdt === "JobFiles";
+  const isSalesDashboard    = state.dashboardSdt === "Sales";
+  const isVendorDashboard   = state.dashboardSdt === "Vendor";
+  const isBuildingDashboard = isJobFilesDashboard || isSalesDashboard;
   const ephemeral = [];
   const canonical = [];
   for (const [tbl, n] of Object.entries(r.counts)) {
+    if (isBuildingDashboard && PRODUCT_TABLES.has(tbl))  continue;
+    if (isVendorDashboard   && BUILDING_TABLES.has(tbl)) continue;
     (CANONICAL.has(tbl) ? canonical : ephemeral).push([tbl, n]);
   }
   ephemeral.sort(([a], [b]) => a.localeCompare(b));
@@ -4633,38 +6115,87 @@ async function loadDashboard() {
     const fmtN  = (n) => Number(n || 0).toLocaleString();
     const fmtPct = (p) => (p == null ? "—" : Number(p).toFixed(1) + "%");
 
+    // KPI shape depends on dashboard scope:
+    //   Vendor / All       → product-coverage KPIs (datasheets+manuals → product)
+    //   JobFiles / Sales   → building-coverage KPIs (contracts/invoices → building)
+    // Same shape (count + pct + sub-line); just different entities. The
+    // "Documents classified" headline is universal.
+    const isJobFiles = state.dashboardSdt === "JobFiles" || state.dashboardSdt === "Sales";
+
     const cards = [
       {
         label: "Documents classified",
         value: fmtPct(kpis.pctClassified),
       },
-      {
+    ];
+    if (isJobFiles) {
+      cards.push(
+        {
+          label: "Buildings",
+          value: fmtN(kpis.buildings),
+        },
+        {
+          label: "Contracts/POs with a building",
+          value: fmtPct(kpis.contractsWithBuilding?.pct),
+          sub: kpis.contractsWithBuilding
+            ? fmtN(kpis.contractsWithBuilding.withBuilding) + " / " + fmtN(kpis.contractsWithBuilding.total)
+              + "  · contract/subcontract/PO/sales_order"
+            : undefined,
+        },
+        {
+          label: "Invoices with a building",
+          value: fmtPct(kpis.invoicesWithBuilding?.pct),
+          sub: kpis.invoicesWithBuilding
+            ? fmtN(kpis.invoicesWithBuilding.withBuilding) + " / " + fmtN(kpis.invoicesWithBuilding.total)
+            : undefined,
+        },
+        {
+          label: "Proposals/Quotes with a building",
+          value: fmtPct(kpis.proposalsWithBuilding?.pct),
+          sub: kpis.proposalsWithBuilding
+            ? fmtN(kpis.proposalsWithBuilding.withBuilding) + " / " + fmtN(kpis.proposalsWithBuilding.total)
+              + "  · proposal/quote/estimate/bid_workup"
+            : undefined,
+        },
+        {
+          label: "Buildings with docs",
+          value: kpis.buildingsWithDocs ? fmtPct(kpis.buildingsWithDocs.pct) : "—",
+          sub: kpis.buildingsWithDocs
+            ? fmtN(kpis.buildingsWithDocs.withDocs) + " / " + fmtN(kpis.buildingsWithDocs.total)
+              + "  · excludes ignored_buildings"
+            : undefined,
+        },
+      );
+    } else {
+      cards.push({
         label: "Vendors",
         value: fmtN(kpis.vendors),
-      },
-      {
-        label: "Products extracted",
-        value: fmtN(kpis.products),
-      },
-      {
-        label: "Manuals with a product",
-        value: fmtPct(kpis.manualsWithProduct.pct),
-        sub: fmtN(kpis.manualsWithProduct.withProduct) + " / " + fmtN(kpis.manualsWithProduct.total)
-             + "  · install/program/operations",
-      },
-      {
-        label: "Datasheets with a product",
-        value: fmtPct(kpis.datasheetsWithProduct.pct),
-        sub: fmtN(kpis.datasheetsWithProduct.withProduct) + " / " + fmtN(kpis.datasheetsWithProduct.total),
-      },
-      {
-        label: "Products with manuals",
-        value: kpis.productsWithManuals ? fmtPct(kpis.productsWithManuals.pct) : "—",
-        sub: kpis.productsWithManuals
-          ? fmtN(kpis.productsWithManuals.withManuals) + " / " + fmtN(kpis.productsWithManuals.total)
-          : undefined,
-      },
-    ];
+      });
+      cards.push(
+        {
+          label: "Products extracted",
+          value: fmtN(kpis.products),
+        },
+        {
+          label: "Manuals with a product",
+          value: fmtPct(kpis.manualsWithProduct.pct),
+          sub: fmtN(kpis.manualsWithProduct.withProduct) + " / " + fmtN(kpis.manualsWithProduct.total)
+               + "  · install/program/operations",
+        },
+        {
+          label: "Datasheets with a product",
+          value: fmtPct(kpis.datasheetsWithProduct.pct),
+          sub: fmtN(kpis.datasheetsWithProduct.withProduct) + " / " + fmtN(kpis.datasheetsWithProduct.total),
+        },
+        {
+          label: "Products with manuals",
+          value: kpis.productsWithManuals ? fmtPct(kpis.productsWithManuals.pct) : "—",
+          sub: kpis.productsWithManuals
+            ? fmtN(kpis.productsWithManuals.withManuals) + " / " + fmtN(kpis.productsWithManuals.total)
+            : undefined,
+        },
+      );
+    }
     for (const k of cards) {
       const card = document.createElement("div");
       card.className = "kpi-card";
@@ -4761,6 +6292,9 @@ function renderFilesScopeChart(scope) {
     options: {
       responsive: true,
       maintainAspectRatio: true,
+      animation: false,
+      animations: { colors: false, x: false, y: false },
+      transitions: { active: { animation: { duration: 0 } } },
       plugins: {
         legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 12 } } },
         tooltip: {
@@ -4779,16 +6313,21 @@ function renderFilesScopeChart(scope) {
 
 async function refreshStatus() {
   const r = await api("/api/status");
-  document.getElementById("status").textContent =
-    "vendors: " + r.counts.vendors + " · files: " + r.counts.files;
+  // (Header status pill removed; counts now live in the sidebar tables.)
 
   const list = document.getElementById("table-list");
   list.innerHTML = "";
   // Alphabetize the sidebar so users find tables by name, not by the order
-  // tableCounts() happened to enumerate them. Skip document_types — it's a
-  // canonical/curated table, displayed in the Source data section instead.
+  // tableCounts() happened to enumerate them. Skip canonical/curated tables —
+  // those have explicit rows under "Canonical tables" in the Source data section.
+  const CANONICAL_IN_SIDEBAR = new Set([
+    "document_types",
+    "canonical_buildings",
+    "building_addresses",
+    "ignored_buildings",
+  ]);
   const entries = Object.entries(r.counts)
-    .filter(([tbl]) => tbl !== "document_types")
+    .filter(([tbl]) => !CANONICAL_IN_SIDEBAR.has(tbl))
     .sort(([a], [b]) => a.localeCompare(b));
   for (const [tbl, n] of entries) {
     const row = document.createElement("div");
@@ -4814,8 +6353,6 @@ async function refreshTableCounts() {
   let r;
   try { r = await api("/api/status"); } catch { return; }
   if (!r || !r.counts) return;
-  document.getElementById("status").textContent =
-    "vendors: " + r.counts.vendors + " · files: " + r.counts.files;
   for (const row of document.querySelectorAll("#table-list .table-row")) {
     const tbl = row.dataset.table;
     if (!tbl || !(tbl in r.counts)) continue;
@@ -4826,11 +6363,19 @@ async function refreshTableCounts() {
   updateSidebarSummary(r);
 }
 
-// Update the Source data summary table (document types + the two ignore lists).
+// Update the Source data summary table (document types + buildings tables + ignore lists).
 function updateSidebarSummary(r) {
   if (!r) return;
-  const dt = document.getElementById("doctypes-count");
-  if (dt && r.counts) dt.textContent = String(r.counts.document_types ?? 0);
+  if (r.counts) {
+    const setCount = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(val ?? 0);
+    };
+    setCount("doctypes-count",            r.counts.document_types);
+    setCount("canonical-buildings-count", r.counts.canonical_buildings);
+    setCount("building-addresses-count",  r.counts.building_addresses);
+    setCount("ignored-buildings-count",   r.counts.ignored_buildings);
+  }
   if (r.ignored) {
     const t = document.getElementById("ignored-types-count");
     const f = document.getElementById("ignored-folders-count");
@@ -4874,6 +6419,166 @@ function getSavedColWidth(table, col) {
 
 function saveColWidth(table, col, w) {
   localStorage.setItem(colWidthKey(table, col), String(Math.round(w)));
+}
+
+// Column-order persistence. The "order" is the user's preferred sequence
+// of column ids; the actual rendered list intersects it with whatever
+// columns the current data has, then appends any unknown columns at the
+// end so a schema change doesn't hide a new column from view.
+function colOrderKey(table) { return "colorder:" + table; }
+
+function getSavedColOrder(table) {
+  const raw = localStorage.getItem(colOrderKey(table));
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v;
+  } catch { /* fall through */ }
+  return null;
+}
+
+function saveColOrder(table, order) {
+  localStorage.setItem(colOrderKey(table), JSON.stringify(order));
+}
+
+// Hidden-columns persistence. Stored as an array of colIds the user has
+// hidden for this table. We store hidden (not visible) so a schema change
+// that adds a new column shows it by default — opposite of how an
+// allowlist would behave.
+function colHiddenKey(table) { return "colhidden:" + table; }
+
+function getSavedColHidden(table) {
+  const raw = localStorage.getItem(colHiddenKey(table));
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v;
+  } catch { /* fall through */ }
+  return [];
+}
+
+function saveColHidden(table, hidden) {
+  localStorage.setItem(colHiddenKey(table), JSON.stringify(hidden));
+}
+
+// Sticky-once defaults: track which "scope keys" we've already applied
+// default hides for. The first time the user enters a scope (e.g.
+// documents+unclassified), we hide the matching set of columns; from
+// then on, the scope key is recorded and we never auto-touch the user's
+// hidden list for that scope again — even if they re-enter it later.
+function colDefaultsAppliedKey() { return "colhidden:defaults-applied"; }
+function getDefaultsApplied() {
+  const raw = localStorage.getItem(colDefaultsAppliedKey());
+  if (!raw) return new Set();
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v)) return new Set(v.filter((x) => typeof x === "string"));
+  } catch { /* fall through */ }
+  return new Set();
+}
+function markDefaultsApplied(scope) {
+  const s = getDefaultsApplied();
+  s.add(scope);
+  localStorage.setItem(colDefaultsAppliedKey(), JSON.stringify(Array.from(s)));
+}
+
+// Apply the default-hide rules for the documents view (sticky-once).
+// Scopes:
+//   documents:base          → hide file_path + sha256 (any documents view)
+//   documents:unclassified  → also hide document_type + confidence
+//   documents:sdt-non-vendor → also hide vendor_name (any sdtFilter that
+//                              is set and isn't Vendor)
+// Each scope only fires once per browser; subsequent visits leave the
+// user's existing hidden list alone, so manual show/hide always wins.
+function applyDocumentsDefaultHides() {
+  if (state.table !== "documents") return;
+  const applied = getDefaultsApplied();
+  const scopes = [];
+  scopes.push({
+    key: "documents:base",
+    cols: ["file_path", "sha256"],
+  });
+  if (state.classifiedFilter === "unclassified") {
+    scopes.push({
+      key: "documents:unclassified",
+      cols: ["document_type", "confidence"],
+    });
+  }
+  if (state.sdtFilter && state.sdtFilter !== "Vendor") {
+    scopes.push({
+      key: "documents:sdt-non-vendor",
+      cols: ["vendor_name"],
+    });
+  }
+  let mutated = false;
+  const hidden = new Set(getSavedColHidden("documents"));
+  for (const s of scopes) {
+    if (applied.has(s.key)) continue;
+    for (const c of s.cols) hidden.add(c);
+    markDefaultsApplied(s.key);
+    mutated = true;
+  }
+  if (mutated) saveColHidden("documents", Array.from(hidden));
+}
+
+// Apply saved order to a freshly-loaded column list. Preserves column ids
+// that no longer exist (drops them) and appends new column ids that the
+// saved order didn't know about — keeps the UI from "losing" a column
+// when the schema changes.
+function applyColOrder(table, columns) {
+  const saved = getSavedColOrder(table);
+  if (!saved || !saved.length) return columns.slice();
+  const set = new Set(columns);
+  const head = saved.filter((c) => set.has(c));
+  const tail = columns.filter((c) => !head.includes(c));
+  return head.concat(tail);
+}
+
+// Wire DnD on a <th> to let the user drag columns into a new order.
+// The handler:
+//   - reads the current column id list from the header row
+//   - moves the dragged id to the drop target position
+//   - saves and re-renders by invoking applyNewOrder(nextOrder)
+// This works for both the server-paginated data-table (re-render via
+// loadRows after saving) and the client-side ephemeral tables (re-render
+// by rearranging DOM cells in place).
+function attachColDrag(th, table, colId, getColumnIds, applyNewOrder) {
+  th.draggable = true;
+  th.classList.add("col-draggable");
+  th.addEventListener("dragstart", (ev) => {
+    ev.dataTransfer.effectAllowed = "move";
+    ev.dataTransfer.setData("text/plain", colId);
+    th.classList.add("col-dragging");
+  });
+  th.addEventListener("dragend", () => {
+    th.classList.remove("col-dragging");
+    document.querySelectorAll("th.col-drop-target").forEach((el) =>
+      el.classList.remove("col-drop-target"));
+  });
+  th.addEventListener("dragover", (ev) => {
+    // Required to allow drop. Suppress the default which is "no drop".
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "move";
+    th.classList.add("col-drop-target");
+  });
+  th.addEventListener("dragleave", () => {
+    th.classList.remove("col-drop-target");
+  });
+  th.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    th.classList.remove("col-drop-target");
+    const dragged = ev.dataTransfer.getData("text/plain");
+    if (!dragged || dragged === colId) return;
+    const ids = getColumnIds();
+    const fromIdx = ids.indexOf(dragged);
+    const toIdx   = ids.indexOf(colId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const next = ids.slice();
+    next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, dragged);
+    saveColOrder(table, next);
+    applyNewOrder(next);
+  });
 }
 
 function attachResizer(th, table, col) {
@@ -4925,11 +6630,41 @@ function enableClientSortAndResize(table, storageKey) {
   if (!table || table.dataset.sortingWired === "1") return;
   table.dataset.sortingWired = "1";
   const ths = Array.from(table.querySelectorAll("thead th"));
-  let sortedCol = -1;
-  let sortDir = "asc";
 
+  // Compute a stable column id for each th up front. Stamping it on the
+  // element lets the reorder code track headers across DOM moves without
+  // relying on positional indices (which change during drag).
   ths.forEach((th, idx) => {
     const original = th.textContent;
+    th.dataset.origLabel = original;
+    const colId = original.toLowerCase().replace(/\s+/g, "_") || ("col" + idx);
+    th.dataset.colId = colId;
+  });
+
+  // Apply saved column order before wiring sort handlers, so closures
+  // that capture column ids stay correct after the initial reorder.
+  if (storageKey) {
+    const ids = ths.map((th) => th.dataset.colId);
+    const saved = getSavedColOrder(storageKey);
+    if (saved && saved.length) {
+      const set = new Set(ids);
+      const head = saved.filter((c) => set.has(c));
+      const tail = ids.filter((c) => !head.includes(c));
+      const next = head.concat(tail);
+      if (next.join(",") !== ids.join(",")) {
+        applyClientColOrder(table, next);
+      }
+    }
+  }
+  // Re-read ths after possible reorder so subsequent code uses the new
+  // visual sequence.
+  const orderedThs = Array.from(table.querySelectorAll("thead th"));
+
+  let sortedColId = null;
+  let sortDir = "asc";
+
+  orderedThs.forEach((th, idx) => {
+    const original = th.dataset.origLabel ?? th.textContent;
     th.textContent = "";
     const label = document.createElement("span");
     label.className = "sort-label";
@@ -4937,20 +6672,26 @@ function enableClientSortAndResize(table, storageKey) {
     th.appendChild(label);
 
     label.addEventListener("click", () => {
-      if (sortedCol === idx) {
+      // Resolve the column's CURRENT position at click time — DOM order
+      // may have shifted since wiring (drag-reorder).
+      const currentThs = Array.from(table.querySelectorAll("thead th"));
+      const colIdx = currentThs.indexOf(th);
+      if (colIdx < 0) return;
+      const myId = th.dataset.colId;
+      if (sortedColId === myId) {
         sortDir = sortDir === "asc" ? "desc" : "asc";
       } else {
-        sortedCol = idx;
+        sortedColId = myId;
         sortDir = "asc";
       }
-      sortRows(table, idx, sortDir);
+      sortRows(table, colIdx, sortDir);
       // Refresh arrows on all headers.
-      ths.forEach((other, j) => {
+      currentThs.forEach((other) => {
         const ll = other.querySelector(".sort-label");
         if (!ll) return;
         const base = ll.dataset.label || ll.textContent.replace(/ [▲▼]$/, "");
         ll.dataset.label = base;
-        if (j === idx) {
+        if (other === th) {
           ll.textContent = base + (sortDir === "desc" ? " ▼" : " ▲");
         } else {
           ll.textContent = base;
@@ -4958,13 +6699,20 @@ function enableClientSortAndResize(table, storageKey) {
       });
     });
 
-    // Persist resize widths only when caller gives us a key. Use the
-    // header text + index as the per-column id within that key.
+    // Persist resize widths only when caller gives us a key.
     if (storageKey) {
-      const colId = original.toLowerCase().replace(/\s+/g, "_") || ("col" + idx);
+      const colId = th.dataset.colId;
       const saved = getSavedColWidth(storageKey, colId);
       if (saved != null) th.style.width = saved + "px";
       attachResizer(th, storageKey, colId);
+      // Drag-reorder: drop handler reorders DOM cells in place and persists.
+      attachColDrag(
+        th,
+        storageKey,
+        colId,
+        () => Array.from(table.querySelectorAll("thead th")).map((x) => x.dataset.colId),
+        (nextOrder) => applyClientColOrder(table, nextOrder),
+      );
     } else {
       // Resize without persistence — minimal grip.
       const grip = document.createElement("span");
@@ -4989,6 +6737,39 @@ function enableClientSortAndResize(table, storageKey) {
       });
     }
   });
+}
+
+// Reorder columns of a static client-side table in place. nextOrder is
+// an array of colId strings; missing ids are dropped (rare — only happens
+// if a column was removed since order was saved). Header cells and every
+// body row's cells get rearranged to match.
+function applyClientColOrder(table, nextOrder) {
+  const headRow = table.querySelector("thead tr");
+  if (!headRow) return;
+  const ths = Array.from(headRow.children);
+  const idToIdx = new Map(ths.map((th, i) => [th.dataset.colId, i]));
+  const headFrag = document.createDocumentFragment();
+  for (const id of nextOrder) {
+    const i = idToIdx.get(id);
+    if (i == null) continue;
+    headFrag.appendChild(ths[i]);
+  }
+  headRow.appendChild(headFrag);
+  // Reorder body cells to match. Each row's cell at original index i
+  // should now appear at the new sequence — using the same idToIdx map.
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  for (const tr of tbody.rows) {
+    const cells = Array.from(tr.children);
+    if (cells.length !== ths.length) continue; // empty/spanning rows
+    const frag = document.createDocumentFragment();
+    for (const id of nextOrder) {
+      const i = idToIdx.get(id);
+      if (i == null) continue;
+      frag.appendChild(cells[i]);
+    }
+    tr.appendChild(frag);
+  }
 }
 
 function sortRows(table, colIdx, dir) {
@@ -5035,6 +6816,74 @@ function autoFitColumn(th, table, col) {
   saveColWidth(table, col, target);
 }
 
+// "Columns" dropdown wiring + render. Wires the button-toggle on first
+// call (idempotent). Re-renders the panel checkbox list every loadRows
+// so it always reflects the current table's columns and the saved
+// hidden set. Toggling a checkbox re-runs loadRows so the table redraws
+// without an extra API roundtrip.
+function refreshColumnsDropdown(table, allCols) {
+  const btn   = document.getElementById("columns-btn");
+  const panel = document.getElementById("columns-panel");
+  const label = document.getElementById("columns-label");
+  if (!btn || !panel) return;
+
+  if (!btn.dataset.wired) {
+    btn.dataset.wired = "1";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      panel.style.display = panel.style.display === "none" ? "" : "none";
+    });
+    document.addEventListener("click", (e) => {
+      if (panel.style.display === "none") return;
+      if (panel.contains(e.target) || btn.contains(e.target)) return;
+      panel.style.display = "none";
+    });
+  }
+
+  const hidden = new Set(getSavedColHidden(table));
+  panel.innerHTML = "";
+  for (const col of allCols) {
+    const row = document.createElement("label");
+    row.className = "row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !hidden.has(col);
+    cb.addEventListener("change", () => {
+      const next = new Set(getSavedColHidden(table));
+      if (cb.checked) next.delete(col);
+      else next.add(col);
+      saveColHidden(table, Array.from(next));
+      loadRows();
+    });
+    const name = document.createElement("span");
+    name.textContent = col;
+    row.appendChild(cb);
+    row.appendChild(name);
+    panel.appendChild(row);
+  }
+  // Footer actions: show all / reset.
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const showAll = document.createElement("button");
+  showAll.type = "button";
+  showAll.textContent = "Show all";
+  showAll.addEventListener("click", () => {
+    saveColHidden(table, []);
+    loadRows();
+  });
+  actions.appendChild(showAll);
+  panel.appendChild(actions);
+
+  // Update the button label so users see when columns are hidden.
+  const hiddenCount = allCols.filter((c) => hidden.has(c)).length;
+  if (label) {
+    label.textContent = hiddenCount === 0
+      ? "Columns"
+      : "Columns (" + hiddenCount + " hidden)";
+  }
+  btn.classList.toggle("active", hiddenCount > 0);
+}
+
 async function loadRows() {
   if (state.view !== "table") return;
   const r = await api("/api/browse", {
@@ -5049,7 +6898,17 @@ async function loadRows() {
     documentTypeFilters: state.documentTypeFilters,
     productFilter: state.productFilter,
     hasProductFilter: state.hasProductFilter,
+    sdtFilter: state.sdtFilter || "",
+    buildingFilter: state.buildingFilter || "",
+    hasBuildingFilter: state.hasBuildingFilter || "",
     ignoredFilter: state.ignoredFilter,
+    // Filter document_types by the active source-data-type. Server treats
+    // a missing/empty filter as "no filter" (shows everything). The "All"
+    // sentinel from the header switcher passes through as "" for the same
+    // server-side semantics.
+    sourceDataTypeFilter: (state.table === "document_types" && state.activeSdt && state.activeSdt !== "All")
+      ? state.activeSdt
+      : "",
     sortColumn: state.sortColumn,
     sortDir: state.sortDir,
   });
@@ -5062,12 +6921,30 @@ async function loadRows() {
     return;
   }
   state.total = r.total;
+  // Sticky-once default hides for the documents view (file_path / sha256
+  // always; document_type + confidence under classifiedFilter=unclassified;
+  // vendor_name under any non-Vendor SDT filter). Each scope fires at most
+  // once per browser, so the user's manual show/hide always wins after.
+  applyDocumentsDefaultHides();
+  // Apply user's saved column order before rendering. Any new columns
+  // introduced since the order was saved get appended at the end.
+  const orderedCols = applyColOrder(state.table, r.columns);
+  // Hidden-column filter is layered on top of order. Stored as colIds the
+  // user has explicitly hidden, so a NEW column added by a schema change
+  // appears by default — visible-by-default semantics.
+  const hiddenSet = new Set(getSavedColHidden(state.table));
+  const visibleCols = orderedCols.filter((c) => !hiddenSet.has(c));
+  // Refresh the docs-only Columns dropdown panel with the current column
+  // list so it reflects the columns of THIS table. Only re-renders if the
+  // dropdown is wired (idempotent — first call wires it once).
+  refreshColumnsDropdown(state.table, orderedCols);
   // header — each th gets explicit width (saved or default), a resizer grip,
   // and a click-to-sort label. Clicking the active column toggles direction.
   const hr = document.createElement("tr");
-  for (const c of r.columns) {
+  for (const c of visibleCols) {
     const th = document.createElement("th");
     th.title = c;
+    th.dataset.colId = c;
     const label = document.createElement("span");
     label.className = "sort-label";
     let arrow = "";
@@ -5087,12 +6964,24 @@ async function loadRows() {
     const w = getSavedColWidth(state.table, c) ?? COL_DEFAULT_WIDTH;
     th.style.width = w + "px";
     attachResizer(th, state.table, c);
+    // Make this header draggable. Drop handler saves new order and
+    // re-runs loadRows so cells get rebuilt in the new order.
+    attachColDrag(
+      th,
+      state.table,
+      c,
+      () => orderedCols.slice(),
+      () => loadRows(),
+    );
     hr.appendChild(th);
   }
-  // Trailing actions column for documents and files (per-row "ignore" link).
+  // Trailing actions column.
+  //   documents: a single ⋮ button → tight column.
+  //   files:     inline folder · ignore links → wider column.
   if (state.table === "documents" || state.table === "files") {
     const thAct = document.createElement("th");
-    thAct.style.width = "60px";
+    thAct.className = "actions-cell";
+    thAct.style.width = state.table === "documents" ? "40px" : "110px";
     thAct.textContent = "";
     hr.appendChild(thAct);
   }
@@ -5101,7 +6990,7 @@ async function loadRows() {
   if (r.rows.length === 0) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = r.columns.length || 1;
+    td.colSpan = visibleCols.length || 1;
     td.className = "empty";
     td.textContent = state.filter
       ? "No rows match the filter."
@@ -5111,7 +7000,7 @@ async function loadRows() {
   } else {
     for (const row of r.rows) {
       const tr = document.createElement("tr");
-      for (const c of r.columns) {
+      for (const c of visibleCols) {
         const td = document.createElement("td");
         const v = row[c];
         if (v === null || v === undefined) {
@@ -5179,6 +7068,13 @@ async function loadRows() {
           td.textContent = s.slice(0, 12) + "…";
           td.title = s;
           td.classList.add("sha-cell");
+        } else if (c === "document_type" && state.table === "documents") {
+          // Hover shows the canonical description from document_types so
+          // the user can recall what an opaque short name (rfc, ntp, coi)
+          // actually means without leaving the table.
+          td.textContent = String(v);
+          const desc = row.document_type_description;
+          td.title = desc ? (v + " — " + desc) : String(v);
         } else {
           const openPath = openablePathFor(state.table, c, row);
           if (openPath) {
@@ -5199,32 +7095,93 @@ async function loadRows() {
         }
         tr.appendChild(td);
       }
-      // Per-row trailing actions for documents and files tables.
-      // - "fix" (documents only): opens the filename rule editor with a
-      //   stub rule and the regex modal pre-loaded with this filename as
-      //   the test sample. Lets the user write a rule starting from a
-      //   misclassification they're looking at right now.
-      // - "ignore": adds the path to ignored_files (notes: "manual") and
-      //   drops the documents row so it disappears from the corpus.
-      if (state.table === "documents" || state.table === "files") {
+      // Per-row trailing actions.
+      // - documents: a single ⋮ menu button opens a popup with all five
+      //   row actions (View Document, View Extract, Open Parent Folder,
+      //   Ignore File, Add to Rule). Keeps the row narrow even with many
+      //   columns visible, and gives each action a full readable label.
+      // - files: keeps the inline folder · ignore links (no extract / no
+      //   classification on this view, so a menu would be overkill).
+      if (state.table === "documents") {
         const td = document.createElement("td");
+        td.className = "actions-cell";
         td.style.textAlign = "right";
-        const path = row.file_path || row.path;
-        const fname = row.file_name || row.name || (path ? path.split(/[\\/]/).pop() : "");
+        const path = row.file_path;
+        const fname = row.document_name || row.file_name ||
+          (path ? path.split(/[\\/]/).pop() : "");
         const currentType = row.document_type || "";
-        if (state.table === "documents" && fname) {
-          const fix = document.createElement("a");
-          fix.href = "#"; fix.className = "open-link";
-          fix.style.fontSize = "11px"; fix.style.marginRight = "8px";
-          fix.textContent = "fix";
-          fix.title = "Open filename rule editor seeded with this file as a test sample";
-          fix.addEventListener("click", (ev) => {
-            ev.preventDefault();
-            startFixFromFile({ name: fname, path, currentType });
-          });
-          td.appendChild(fix);
-        }
+        const extractStatus = row.extract; // 'ok' | 'err' | '' (no extract yet)
+
+        const menuBtn = document.createElement("button");
+        menuBtn.type = "button";
+        menuBtn.className = "row-menu-btn";
+        menuBtn.title = "Row actions";
+        menuBtn.textContent = "⋮";
+        menuBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openRowMenu(menuBtn, [
+            {
+              label: "View Document",
+              disabled: !path,
+              title: path ? ("Open " + path) : "No file path on this row",
+              onClick: () => { if (path) openFile(path); },
+            },
+            {
+              label: "View Extract",
+              disabled: extractStatus !== "ok" && extractStatus !== "err",
+              title: extractStatus === "ok"
+                ? "View extracted text"
+                : (extractStatus === "err"
+                   ? "Extraction failed — show error"
+                   : "No extract yet"),
+              onClick: () => { if (row.id != null) showExtract(row.id); },
+            },
+            {
+              label: "Open Parent Folder",
+              disabled: !path,
+              title: "Reveal this file in Explorer",
+              onClick: () => { if (path) openFolder(path); },
+            },
+            {
+              label: "Ignore File",
+              disabled: !path,
+              title: "Add this file to ignored_files (note: manual)",
+              onClick: async () => {
+                const rr = await api("/api/ignored-files/add", { paths: [path], notes: "manual" });
+                if (!rr.ok) { log("ignore failed: " + rr.error, "err"); return; }
+                log("ignored " + path, "ok");
+                loadRows();
+                refreshTableCounts();
+              },
+            },
+            {
+              label: "Add to Rule",
+              disabled: !fname,
+              title: "Open filename rule editor seeded with this file as a test sample",
+              onClick: () => startFixFromFile({ name: fname, path, currentType }),
+            },
+          ]);
+        });
+        td.appendChild(menuBtn);
+        tr.appendChild(td);
+      } else if (state.table === "files") {
+        const td = document.createElement("td");
+        td.className = "actions-cell";
+        td.style.textAlign = "right";
+        const path = row.path;
         if (path) {
+          const folder = document.createElement("a");
+          folder.href = "#"; folder.className = "open-link";
+          folder.style.fontSize = "11px"; folder.style.marginRight = "8px";
+          folder.textContent = "folder";
+          folder.title = "Open parent folder (reveal this file in Explorer)";
+          folder.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            openFolder(path);
+          });
+          td.appendChild(folder);
+
           const a = document.createElement("a");
           a.href = "#"; a.className = "open-link";
           a.style.fontSize = "11px";
@@ -5295,6 +7252,9 @@ function makeDoughnut(canvasId, slices, filterFor) {
     responsive: true,
     maintainAspectRatio: false,
     cutout: "58%",
+    animation: false,
+    animations: { colors: false, x: false, y: false },
+    transitions: { active: { animation: { duration: 0 } } },
     plugins: {
       legend: {
         position: "bottom",
@@ -5334,7 +7294,45 @@ function makeDoughnut(canvasId, slices, filterFor) {
     },
   };
 
-  liveCharts[canvasId] = new Chart(canvas, { type: "doughnut", data, options });
+  // Inline plugin: draw the total in the doughnut hole.
+  // We render in afterDatasetsDraw (NOT afterDraw): in Chart.js v4 the
+  // tooltip renders between afterDatasetsDraw and afterDraw, so afterDraw
+  // would paint the total on top of the tooltip. Drawing here puts the
+  // center text above the slices but below the tooltip.
+  const centerTotalPlugin = {
+    id: "centerTotal",
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const cx = (chartArea.left + chartArea.right) / 2;
+      const cy = (chartArea.top + chartArea.bottom) / 2;
+      // Inner radius: chart-area shorter dimension * cutout fraction / 2.
+      const dim = Math.min(
+        chartArea.right - chartArea.left,
+        chartArea.bottom - chartArea.top,
+      );
+      const inner = (dim * 0.58) / 2;
+      const numSize = Math.max(14, Math.min(28, inner * 0.42));
+      const labelSize = Math.max(9, Math.min(13, inner * 0.20));
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = getCssVar("--text") || "#1a1820";
+      ctx.font = "600 " + numSize + "px system-ui, sans-serif";
+      ctx.fillText(total.toLocaleString(), cx, cy - labelSize * 0.4);
+      ctx.fillStyle = getCssVar("--muted") || "#6c6478";
+      ctx.font = labelSize + "px system-ui, sans-serif";
+      ctx.fillText("total", cx, cy + numSize * 0.55);
+      ctx.restore();
+    },
+  };
+
+  liveCharts[canvasId] = new Chart(canvas, {
+    type: "doughnut",
+    data,
+    options,
+    plugins: [centerTotalPlugin],
+  });
 }
 
 // Switch to the documents table with the given filter delta applied.
@@ -5350,17 +7348,16 @@ function drillToDocuments(delta) {
   state.documentTypeFilters = [];
   state.productFilter = "";
   state.hasProductFilter = "";
+  state.sdtFilter = "";
+  state.buildingFilter = "";
+  state.hasBuildingFilter = "";
   Object.assign(state, delta);
 
   document.getElementById("filter").value = "";
   document.getElementById("classified-filter").value = state.classifiedFilter;
   refreshMultiButton("filetype");
   refreshMultiButton("doctype");
-  // The dropdown can only express "Any" / "≥ low" / "≥ medium" / "high only".
-  // exactConfidence (drilldown) doesn't map cleanly onto that, so when an
-  // exact filter is active we show "Any" — the log line carries the truth.
-  document.getElementById("confidence-filter").value =
-    state.exactConfidence ? "all" : state.minConfidence;
+  document.getElementById("sdt-filter").value = state.sdtFilter || "";
 
   document.querySelectorAll(".table-row").forEach((el) => {
     el.classList.toggle("active",
@@ -5383,6 +7380,7 @@ function drillToDocuments(delta) {
   if (delta.documentTypeFilters && delta.documentTypeFilters.length) summary.push("document_type=" + delta.documentTypeFilters.join(","));
   if (delta.productFilter)    summary.push("product=" + delta.productFilter);
   if (delta.hasProductFilter) summary.push("has_product=" + delta.hasProductFilter);
+  if (delta.sdtFilter)        summary.push("SDT=" + delta.sdtFilter);
   log("drilled to documents · " + summary.join(" · "), "info");
 }
 
@@ -5402,8 +7400,9 @@ function chartFilterHidesAllPies(cf) {
   // hasProductFilter is set (one side only).
   const productHidden    = !!cf.productFilter;
   const coverageHidden   = !!cf.productFilter || !!cf.hasProductFilter;
+  const sdtHidden        = !!cf.sdtFilter;
   return classifiedHidden && confidenceHidden && filetypeHidden && doctypeHidden
-    && productHidden && coverageHidden;
+    && productHidden && coverageHidden && sdtHidden;
 }
 
 // Apply a chart-page drilldown delta into state.chartFilter and reload.
@@ -5422,6 +7421,7 @@ function chartDrillIn(delta) {
       documentTypeFilters: (composed.documentTypeFilters || []).slice(),
       productFilter:       composed.productFilter || "",
       hasProductFilter:    composed.hasProductFilter || "",
+      sdtFilter:           composed.sdtFilter || "",
     });
     return;
   }
@@ -5437,6 +7437,9 @@ function clearChartFilter() {
     documentTypeFilters: [],
     productFilter: "",
     hasProductFilter: "",
+    sdtFilter: "",
+    buildingFilter: "",
+    hasBuildingFilter: "",
   };
   loadCharts();
 }
@@ -5452,20 +7455,85 @@ function chartViewDocuments() {
     documentTypeFilters: cf.documentTypeFilters.slice(),
     productFilter:       cf.productFilter || "",
     hasProductFilter:    cf.hasProductFilter || "",
+    sdtFilter:           cf.sdtFilter || "",
+    buildingFilter:      cf.buildingFilter || "",
+    hasBuildingFilter:   cf.hasBuildingFilter || "",
   });
 }
 
 function renderBreadcrumb() {
   const cf = state.chartFilter;
-  const parts = ["All documents"];
-  if (cf.classifiedFilter && cf.classifiedFilter !== "all") parts.push(cf.classifiedFilter);
-  if (cf.fileTypeFilters     && cf.fileTypeFilters.length)     parts.push("file_type=" + cf.fileTypeFilters.join(", "));
-  if (cf.documentTypeFilters && cf.documentTypeFilters.length) parts.push("document_type=" + cf.documentTypeFilters.join(", "));
-  if (cf.exactConfidence)    parts.push("confidence=" + cf.exactConfidence);
-  if (cf.productFilter)      parts.push("product=" + cf.productFilter);
-  if (cf.hasProductFilter)   parts.push("has_product=" + cf.hasProductFilter);
-  document.getElementById("chart-crumb").textContent = parts.join(" › ");
-  const filtered = parts.length > 1;
+  // Each chip: dimension -> clearDelta to merge into chartFilter when × clicks.
+  // Multi-select dimensions render as one chip with comma-joined values; the
+  // × clears the whole array in one click (per user spec).
+  const chips = [];
+  if (cf.classifiedFilter && cf.classifiedFilter !== "all") {
+    chips.push({ label: cf.classifiedFilter, clear: { classifiedFilter: "all" } });
+  }
+  if (cf.sdtFilter) {
+    chips.push({ label: "SDT=" + cf.sdtFilter, clear: { sdtFilter: "" } });
+  }
+  if (cf.fileTypeFilters && cf.fileTypeFilters.length) {
+    chips.push({ label: "file_type=" + cf.fileTypeFilters.join(", "),
+                 clear: { fileTypeFilters: [] } });
+  }
+  if (cf.documentTypeFilters && cf.documentTypeFilters.length) {
+    chips.push({ label: "document_type=" + cf.documentTypeFilters.join(", "),
+                 clear: { documentTypeFilters: [] } });
+  }
+  if (cf.exactConfidence) {
+    chips.push({ label: "confidence=" + cf.exactConfidence, clear: { exactConfidence: "" } });
+  }
+  if (cf.productFilter) {
+    chips.push({ label: "product=" + cf.productFilter, clear: { productFilter: "" } });
+  }
+  if (cf.hasProductFilter) {
+    chips.push({ label: "has_product=" + cf.hasProductFilter, clear: { hasProductFilter: "" } });
+  }
+  if (cf.buildingFilter) {
+    // Show first 8 chars of the UID so the chip stays compact; the full
+    // UID is the value being filtered on. The Buildings table view shows
+    // the human-readable address.
+    chips.push({
+      label: "building=" + cf.buildingFilter.slice(0, 12) + "…",
+      clear: { buildingFilter: "" },
+    });
+  }
+  if (cf.hasBuildingFilter) {
+    chips.push({ label: "has_building=" + cf.hasBuildingFilter, clear: { hasBuildingFilter: "" } });
+  }
+
+  const crumb = document.getElementById("chart-crumb");
+  crumb.innerHTML = "";
+  // Root chip stays unclosable — it's the "All documents" anchor.
+  const root = document.createElement("span");
+  root.className = "chip root";
+  root.textContent = "All documents";
+  crumb.appendChild(root);
+
+  for (const c of chips) {
+    const sep = document.createElement("span");
+    sep.className = "chip-sep";
+    sep.textContent = "›";
+    crumb.appendChild(sep);
+
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.appendChild(document.createTextNode(c.label));
+    const x = document.createElement("button");
+    x.className = "chip-x";
+    x.type = "button";
+    x.title = "Remove this filter";
+    x.textContent = "×";
+    x.addEventListener("click", () => {
+      Object.assign(state.chartFilter, c.clear);
+      loadCharts();
+    });
+    chip.appendChild(x);
+    crumb.appendChild(chip);
+  }
+
+  const filtered = chips.length > 0;
   document.getElementById("chart-clear").style.display      = filtered ? "" : "none";
   document.getElementById("chart-view-docs").style.display  = filtered ? "" : "none";
 }
@@ -5486,7 +7554,8 @@ async function loadCharts() {
     || (cf.fileTypeFilters && cf.fileTypeFilters.length)
     || (cf.documentTypeFilters && cf.documentTypeFilters.length)
     || cf.productFilter
-    || cf.hasProductFilter;
+    || cf.hasProductFilter
+    || cf.sdtFilter;
   document.getElementById("chart-meta").textContent = isScoped
     ? "Showing " + r.total + " documents matching the filter chain."
     : "Snapshot of all " + r.total + " documents and " + (r.totalFiles ?? 0) +
@@ -5512,6 +7581,38 @@ async function loadCharts() {
       (label) => ({
         classifiedFilter: label === "Classified" ? "classified" : "unclassified",
       }),
+    );
+  }
+
+  // SDT pie — Vendor / JobFiles / Sales / Any / unstamped. Hidden once an
+  // SDT filter is active (would just be a 100% slice).
+  const sdtCard = document.getElementById("card-sdt");
+  const sdtSlices = (r.bySdt || []);
+  if (cf.sdtFilter || sdtSlices.length === 0) {
+    sdtCard.style.display = "none";
+    if (liveCharts["chart-sdt"]) {
+      liveCharts["chart-sdt"].destroy();
+      delete liveCharts["chart-sdt"];
+    }
+  } else {
+    sdtCard.style.display = "";
+    // Stable color per SDT label so Vendor doesn't swap colors when
+    // counts change ordering.
+    const SDT_COLORS = {
+      "Vendor":   "#8b2090",
+      "JobFiles": "#3a8fd6",
+      "Sales":    "#d68a3a",
+      "Any":      "#4a9d4a",
+      "(none)":   "#5a5563",
+    };
+    makeDoughnut(
+      "chart-sdt",
+      sdtSlices.map((row, i) => ({
+        label: row.sdt,
+        value: row.n,
+        color: SDT_COLORS[row.sdt] || EXT_PALETTE[i % EXT_PALETTE.length],
+      })),
+      (label) => ({ sdtFilter: label }),
     );
   }
 
@@ -5613,10 +7714,16 @@ async function loadCharts() {
   }
 
   // Pies 7-9 — product family ----------------------------------------
+  // All three product pies hide on JobFiles AND Sales: those corpora are
+  // per-job/per-deal records (PO, RFI, lien releases, quotes) — products
+  // are a manufacturer concept and never link there. Showing "100% without
+  // products" is just noise.
+  const isJobFilesSdt = cf.sdtFilter === "JobFiles" || cf.sdtFilter === "Sales";
+
   // (c) Coverage: docs with at least one product link vs without.
   //     Hidden once a productFilter narrows everything to one side.
   const coverageCard = document.getElementById("card-product-coverage");
-  if (cf.productFilter) {
+  if (cf.productFilter || isJobFilesSdt) {
     coverageCard.style.display = "none";
     if (liveCharts["chart-product-coverage"]) {
       liveCharts["chart-product-coverage"].destroy();
@@ -5637,7 +7744,7 @@ async function loadCharts() {
   // (a) Top 20 products. When a productFilter is already set, this pie is
   //     redundant (single slice — the chosen product) so we hide it.
   const productsTopCard = document.getElementById("card-products-top");
-  if (cf.productFilter || !(r.byProductTop || []).length) {
+  if (cf.productFilter || isJobFilesSdt || !(r.byProductTop || []).length) {
     productsTopCard.style.display = "none";
     if (liveCharts["chart-products-top"]) {
       liveCharts["chart-products-top"].destroy();
@@ -5668,7 +7775,7 @@ async function loadCharts() {
   // (b) Products discovered per vendor. Static / informational —
   //     non-clickable. Hidden once productFilter narrows the corpus.
   const productsVendorCard = document.getElementById("card-products-vendor");
-  if (cf.productFilter || !(r.productsPerVendor || []).length) {
+  if (cf.productFilter || isJobFilesSdt || !(r.productsPerVendor || []).length) {
     productsVendorCard.style.display = "none";
     if (liveCharts["chart-products-vendor"]) {
       liveCharts["chart-products-vendor"].destroy();
@@ -5685,6 +7792,61 @@ async function loadCharts() {
       })),
       // Vendor-filter not yet supported — return null to disable drilldown.
       () => null,
+    );
+  }
+
+  // Building cards. These hide outside JobFiles + Sales (Vendor docs don't
+  // link to buildings), and the coverage card hides once a buildingFilter
+  // or hasBuildingFilter has narrowed the corpus to one side.
+  const showBuildings = cf.sdtFilter === "JobFiles"
+    || cf.sdtFilter === "Sales"
+    || cf.hasBuildingFilter
+    || cf.buildingFilter;
+  // (a) Coverage: docs with vs. without a building link.
+  const buildingCoverageCard = document.getElementById("card-building-coverage");
+  if (!showBuildings || cf.buildingFilter || cf.hasBuildingFilter) {
+    buildingCoverageCard.style.display = "none";
+    if (liveCharts["chart-building-coverage"]) {
+      liveCharts["chart-building-coverage"].destroy();
+      delete liveCharts["chart-building-coverage"];
+    }
+  } else {
+    buildingCoverageCard.style.display = "";
+    makeDoughnut(
+      "chart-building-coverage",
+      [
+        { label: "with buildings",    value: r.docsWithBuildings ?? 0,    color: "#4a9d4a" },
+        { label: "without buildings", value: r.docsWithoutBuildings ?? 0, color: "#5a5563" },
+      ],
+      (label) => ({ hasBuildingFilter: label === "with buildings" ? "yes" : "no" }),
+    );
+  }
+
+  // (b) Top 20 buildings by doc count. Drilldown sets buildingFilter
+  // to the buildings.id so the next chart pass narrows to that site.
+  const buildingsTopCard = document.getElementById("card-buildings-top");
+  if (!showBuildings || cf.buildingFilter || !(r.byBuildingTop || []).length) {
+    buildingsTopCard.style.display = "none";
+    if (liveCharts["chart-buildings-top"]) {
+      liveCharts["chart-buildings-top"].destroy();
+      delete liveCharts["chart-buildings-top"];
+    }
+  } else {
+    buildingsTopCard.style.display = "";
+    // Map label → buildings.id so the drilldown can recover the id from
+    // the visible label (makeDoughnut's filterFor only sees the label).
+    const labelToId = new Map(r.byBuildingTop.map((b) => [b.label, b.building_id]));
+    makeDoughnut(
+      "chart-buildings-top",
+      r.byBuildingTop.map((row, i) => ({
+        label: row.label,
+        value: row.n,
+        color: EXT_PALETTE[i % EXT_PALETTE.length],
+      })),
+      (label) => {
+        const id = labelToId.get(label);
+        return id ? { buildingFilter: String(id) } : null;
+      },
     );
   }
 }
@@ -5721,6 +7883,25 @@ function setListingPath(p) {
   if (p) localStorage.setItem(LISTING_KEY, p);
   else   localStorage.removeItem(LISTING_KEY);
   refreshListingDisplay();
+  // Auto-set the active SDT based on the chosen folder. Mirrors the
+  // ingest-time path detection: if the path sits under a JobFiles or
+  // vendors segment, switch SDT to match. No-op for "Other" paths so
+  // the user's manual SDT pick isn't trampled.
+  if (p) maybeAutoSwitchSdtFromPath(p);
+}
+
+// Inspect a path and auto-switch state.activeSdt if the path clearly
+// belongs to one corpus. Case-insensitive segment match. Idempotent —
+// silent when SDT already matches.
+function maybeAutoSwitchSdtFromPath(p) {
+  const segs = String(p).split(/[\\/]/).map((s) => s.toLowerCase());
+  let target = null;
+  if (segs.includes("jobfiles")) target = "JobFiles";
+  else if (segs.includes("vendors")) target = "Vendor";
+  else if (segs.includes("sales")) target = "Sales";
+  if (!target) return;
+  if (state.activeSdt === target) return;
+  setActiveSdt(target);  // setActiveSdt logs "Using X Rules" for us
 }
 
 // Folder picker modal: navigate the filesystem and pick a "vendors" root.
@@ -5864,7 +8045,7 @@ async function runIngest(which) {
   log("Running " + which + " ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
   setIngestEnabled(false);
   try {
-    const r = await api("/api/ingest", { which, source, useIgnores });
+    const r = await api("/api/ingest", { which, source, useIgnores, sourceDataType: state.activeSdt });
     if (!r.ok) { log(r.error, "err"); return; }
     if (which === "vendors") {
       log("vendors: +" + r.addedVendors + " new, " + r.skippedPaths + " paths skipped", "ok");
@@ -5872,12 +8053,24 @@ async function runIngest(which) {
       const ignoreNote = (r.folderSkipped || r.docsSkipped)
         ? " · ignore: " + (r.folderSkipped || 0) + " by folder, " + (r.docsSkipped || 0) + " no-doc by ext"
         : "";
-      log("files: " + r.files + " rows written, " + r.skippedPaths + " paths skipped" + ignoreNote, "ok");
+      // Incremental ingest report: emphasize what's new vs. what was
+      // already in the table (and therefore kept its prior classification
+      // and building-link rows).
+      log("files: +" + (r.filesAdded || 0) + " new, " + (r.filesUnchanged || 0) +
+          " unchanged, " + r.skippedPaths + " paths skipped" + ignoreNote, "ok");
+      if (r.bySourceDataType) {
+        const parts = [];
+        for (const [k, v] of Object.entries(r.bySourceDataType)) {
+          if (v > 0) parts.push(k + ": " + v);
+        }
+        if (parts.length) log("by source data type: " + parts.join(" · "), "info");
+      }
     } else if (which === "full") {
       log("full: vendors +" + r.vendors.addedVendors + ", files " + r.files.files + " rows", "ok");
     }
     await refreshStatus();
     await loadRows();
+    refreshChartsIfActive();
   } catch (e) {
     log(String(e), "err");
   } finally {
@@ -5890,13 +8083,26 @@ async function runPurge(target) {
   //   all     → vendors, files (cascades to documents, document_extracts, document_products), products
   //   files   → files (cascades to documents, document_extracts, document_products)
   //   vendors → vendors only (FK-checked: requires files+products empty)
+  //   hashes  → clears documents.sha256 only (no table wiped)
   // Preserved across all purges: document_types, ignored_file_types, ignored_folders.
   const PURGED_TABLES = {
     all:     ["vendors", "files", "documents", "document_extracts", "products", "document_products"],
     files:   ["files", "documents", "document_extracts", "document_products"],
     vendors: ["vendors"],
   };
-  const label = target === "all" ? "ALL data tables" : target;
+  if (target === "hashes") {
+    if (!window.confirm("Clear all sha256 hashes from documents? On-disk .hash sidecars stay (use \"Purge text backups\" to also delete those).")) return;
+    log("Purging hashes…", "info");
+    const r = await api("/api/purge", { target });
+    if (!r.ok) { log(r.error, "err"); return; }
+    log("purged hashes — cleared documents.sha256 on " + (r.cleared || 0) + " rows. .hash sidecars preserved on disk.", "ok");
+    await refreshStatus();
+    await loadRows();
+    return;
+  }
+  const label = target === "all"
+    ? "the 8 ephemeral tables (vendors, files, documents, document_extracts, products, document_products, buildings, document_buildings) — canonical_buildings, building_addresses, and ignored_* are preserved"
+    : target;
   if (!window.confirm("Really delete every row from " + label + "?")) return;
   log("Purging " + label + "…", "info");
   const r = await api("/api/purge", { target });
@@ -5931,51 +8137,64 @@ async function runPurgeTextBackups() {
   }
 }
 
-// Full Process: vendors → files → hash → dedup → classify-by-filename →
-// extract → classify-by-content → classify-products. Hash and dedup
-// happen up front so classification and the slow PDF extract never run
-// on duplicate copies. Each stage waits for the previous to finish;
-// extract and hash poll until idle. Runs every stage every time
-// (idempotent by design — only-missing flags keep re-runs cheap).
+// SDT-specific Full Process step list — surfaced under the action row's
+// description and re-used as the confirm() prompt. The fixed prefix is
+// the same for every SDT (ingest → hash → dedup → classify → convert2txt
+// → content classify); the entity-extractor steps that follow depend on
+// which corpus the user is in:
+//   Vendor   → extract vendors, extract products
+//   JobFiles → extract buildings
+//   Any/All  → no entity extractors (the rule editors can still be run
+//              manually for any subset).
+function fullProcessDescription(sdt) {
+  const fixed = "Files + documents + hash + dedup + classify + convert2txt + content classify";
+  let suffix;
+  if (sdt === "Vendor")                            suffix = " + extract vendors + extract products";
+  else if (sdt === "JobFiles" || sdt === "Sales")  suffix = " + extract buildings";
+  else                                             suffix = "";
+  return fixed + suffix + " (SDT: " + (sdt || "—") + ")";
+}
+
+// Full Process: files → hash → dedup → classify-by-filename →
+// extract → classify-by-content → SDT-specific entity extractors.
+// Hash and dedup happen up front so classification and the slow PDF
+// extract never run on duplicate copies. Each stage waits for the
+// previous to finish; extract and hash poll until idle. Runs every
+// stage every time (idempotent by design — only-missing flags keep
+// re-runs cheap).
 async function runFullProcess() {
-  if (!window.confirm("Run the full process? Vendors + files, hash + de-duplicate, classify, extract PDFs (slow), classify by content, extract products.")) return;
+  if (!window.confirm("Run the full process?\n\n" + fullProcessDescription(state.activeSdt))) return;
   if (!state.listingPath) {
     log("No listing chosen. Click 'Choose folder…' first.", "err");
     return;
   }
   setIngestEnabled(false);
-  log("══ Full Process: starting", "info");
+  log("══ Full Process: starting (SDT: " + state.activeSdt + ")", "info");
   // Keep the home dashboard live-refreshing for the full duration of the
   // pipeline. The extract/hash status pollers handle on/off transitions
   // for those individual stages, but ingest/classify are too short to
   // trip those flags — start polling unconditionally here, stop in finally.
   startDashboardPolling();
   try {
-    // 1. Vendors ingest
-    log("[1/8] vendors ingest…", "info");
-    {
-      const r = await api("/api/ingest", { which: "vendors", source: state.listingPath });
-      if (!r.ok) { log("vendors ingest failed: " + r.error, "err"); return; }
-      log("  +" + r.addedVendors + " new vendors, " + r.skippedPaths + " skipped", "ok");
-    }
-
-    // 2. Files ingest. Honours ignored_files from prior runs, so paths
+    // 1. Files ingest. Honours ignored_files from prior runs, so paths
     //    we de-duplicated last time stay out of documents this time.
+    //    (Vendor creation no longer happens here — see step 5 below.)
     const useIgnores = getUseIgnores();
-    log("[2/8] files ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
+    log("[1/8] files ingest" + (useIgnores ? "" : " (ignore lists OFF)") + "…", "info");
     {
-      const r = await api("/api/ingest", { which: "files", source: state.listingPath, useIgnores });
+      const r = await api("/api/ingest", { which: "files", source: state.listingPath, useIgnores, sourceDataType: state.activeSdt });
       if (!r.ok) { log("files ingest failed: " + r.error, "err"); return; }
-      log("  " + r.files + " file rows, " + r.docsCreated + " documents" +
+      log("  +" + (r.filesAdded || 0) + " new files, " + (r.filesUnchanged || 0) +
+          " unchanged · " + r.docsCreated + " new documents" +
           ((r.folderSkipped || r.docsSkipped) ? (" · ignore: " + (r.folderSkipped || 0) + " by folder, " + (r.docsSkipped || 0) + " no-doc by ext") : ""), "ok");
     }
     await refreshStatus();
     await loadRows();
 
-    // 3. Hash files (background). Done early so dedup can run before any
+    // 2. Hash files (background). Done early so dedup can run before any
     //    classification or extraction work — no point processing copies
     //    that we'll mark ignored a moment later.
-    log("[3/8] hash files (background)…", "info");
+    log("[2/8] hash files (background)…", "info");
     {
       const r = await api("/api/hash-start", { onlyMissing: true });
       if (!r.ok && !/already running/i.test(r.error || "")) {
@@ -5987,11 +8206,11 @@ async function runFullProcess() {
     log("  hashing phase complete", "ok");
     await refreshStatus();
 
-    // 4. De-duplicate: pull clusters, keep the shortest path in each,
+    // 3. De-duplicate: pull clusters, keep the shortest path in each,
     //    add the rest to ignored_files with note "de-duplicated".
     //    Each /api/ignored-files/add deletes the matching documents row,
     //    so subsequent stages skip the duplicates automatically.
-    log("[4/8] de-duplicate by hash…", "info");
+    log("[3/8] de-duplicate by hash…", "info");
     {
       const dr = await fetch("/api/duplicates").then((res) => res.json());
       if (!dr.ok) { log("duplicates lookup failed: " + dr.error, "err"); return; }
@@ -6019,8 +8238,8 @@ async function runFullProcess() {
     await refreshStatus();
     await loadRows();
 
-    // 5. Classify by filename (now skips duplicates we just dropped)
-    log("[5/8] classify by filename…", "info");
+    // 4. Classify by filename (now skips duplicates we just dropped)
+    log("[4/8] classify by filename…", "info");
     {
       const r = await api("/api/classify", {});
       if (!r.ok) { log("classify failed: " + r.error, "err"); return; }
@@ -6030,8 +8249,24 @@ async function runFullProcess() {
     }
     await refreshStatus();
 
+    // 5. Vendor extraction — only meaningful for the Vendor corpus.
+    //    Stamps documents.vendor_id from rule matches (path/name/content).
+    //    Other SDTs skip; vendors are a manufacturer concept that doesn't
+    //    apply to JobFiles.
+    if (state.activeSdt === "Vendor") {
+      log("[5/8] vendor extractor (rules)…", "info");
+      const r = await api("/api/classify-vendors", { mode: "all" });
+      if (!r.ok) { log("vendor extract failed: " + r.error, "err"); return; }
+      log("  " + r.distinctVendors + " distinct vendors · " +
+          r.docsMatched + "/" + r.docsScanned + " docs matched", "ok");
+    } else {
+      log("[5/8] vendor extractor — skipped (SDT is " + state.activeSdt + ", not Vendor)", "info");
+    }
+    await refreshStatus();
+    await loadRows();
+
     // 6. Extract PDFs (background, slow). Same dedup-aware corpus.
-    log("[6/8] extract PDF text (background, this is the slow stage)…", "info");
+    log("[6/8] extract document text — PDF + .docx (background, this is the slow stage)…", "info");
     {
       const r = await api("/api/extract-start", { onlyMissing: true });
       if (!r.ok && !/already running/i.test(r.error || "")) {
@@ -6052,13 +8287,29 @@ async function runFullProcess() {
     }
     await refreshStatus();
 
-    // 8. Classify products (vendor-scoped rules; M:N to documents)
-    log("[8/8] classify products…", "info");
-    {
+    // 8. SDT-specific entity extractor:
+    //      Vendor             → product extractor (vendor-scoped rules; M:N)
+    //      JobFiles or Sales  → building extractor (both corpora reference
+    //                           job sites / projects)
+    //      other              → skipped
+    if (state.activeSdt === "Vendor") {
+      log("[8/8] product extractor…", "info");
       const r = await api("/api/classify-products", {});
       if (!r.ok) { log("product classify failed: " + r.error, "err"); return; }
       log("  " + r.distinctProducts + " products · " + r.totalLinks + " doc-product links · " +
           r.docsWithProducts + "/" + r.docsScanned + " docs matched", "ok");
+    } else if (state.activeSdt === "JobFiles" || state.activeSdt === "Sales") {
+      log("[8/8] building extractor (background, filename + content)…", "info");
+      const r = await api("/api/buildings-match-start", { onlyMissing: true, sdt: ["JobFiles", "Sales"], mode: "all" });
+      if (!r.ok && !/already running/i.test(r.error || "")) {
+        log("buildings match start failed: " + (r.error || "unknown"), "err");
+        return;
+      }
+      startBuildingsMatchPolling();
+      await waitForBuildingsMatchIdle();
+      log("  building extraction phase complete", "ok");
+    } else {
+      log("[8/8] entity extractor — skipped (SDT is " + state.activeSdt + ")", "info");
     }
     await refreshStatus();
     await loadRows();
@@ -6109,6 +8360,24 @@ async function waitForHashIdle() {
   throw new Error("hashing did not finish within 1 hour");
 }
 
+async function waitForBuildingsMatchIdle() {
+  // Building extraction reads already-extracted text + filenames, so it
+  // runs in tens of minutes at most for the corpora we expect. 2 hours
+  // is a safe ceiling.
+  const HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+  const POLL_MS = 1500;
+  const started = Date.now();
+  while (Date.now() - started < HARD_TIMEOUT_MS) {
+    let r;
+    try {
+      r = await fetch("/api/buildings-match-status").then((res) => res.json());
+    } catch { r = null; }
+    if (r && r.ok && r.status && !r.status.running) return;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+  throw new Error("buildings match did not finish within 2 hours");
+}
+
 // Returns the row's full path string when this cell should render as a
 // clickable "open the file" link, or null otherwise.
 //
@@ -6145,6 +8414,91 @@ async function openFile(path) {
     log("opened: " + path, "ok");
   } catch (e) {
     log("open failed: " + String(e), "err");
+  }
+}
+
+async function openFolder(path) {
+  try {
+    const r = await api("/api/open-folder", { path });
+    if (!r.ok) {
+      log("open folder failed: " + (r.error || "unknown error"), "err");
+      return;
+    }
+    log("revealed: " + path, "ok");
+  } catch (e) {
+    log("open folder failed: " + String(e), "err");
+  }
+}
+
+// Per-row action menu. anchor is the button the user clicked; items is an
+// array of { label, onClick, disabled?, title? }. Renders a single popup
+// element that's reused across rows; only one menu is open at a time.
+let _rowMenuEl = null;
+function closeRowMenu() {
+  if (_rowMenuEl && _rowMenuEl.parentNode) _rowMenuEl.parentNode.removeChild(_rowMenuEl);
+  _rowMenuEl = null;
+}
+function openRowMenu(anchor, items) {
+  // Toggle off if the same anchor's menu is already open.
+  if (_rowMenuEl && _rowMenuEl.dataset.anchorId === anchor.dataset.anchorId) {
+    closeRowMenu();
+    return;
+  }
+  closeRowMenu();
+  if (!anchor.dataset.anchorId) anchor.dataset.anchorId = "rm-" + Math.random().toString(36).slice(2);
+
+  const menu = document.createElement("div");
+  menu.className = "row-menu";
+  menu.dataset.anchorId = anchor.dataset.anchorId;
+  for (const it of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "row-menu-item";
+    btn.textContent = it.label;
+    if (it.title) btn.title = it.title;
+    if (it.disabled) {
+      btn.disabled = true;
+    } else {
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeRowMenu();
+        try { it.onClick(); } catch (e) { log("menu action failed: " + String(e), "err"); }
+      });
+    }
+    menu.appendChild(btn);
+  }
+
+  // Position below the anchor, right-aligned. If it would clip the right
+  // edge of the viewport, flip to anchor.left.
+  document.body.appendChild(menu);
+  const ar = anchor.getBoundingClientRect();
+  const mr = menu.getBoundingClientRect();
+  let left = ar.right - mr.width;
+  if (left < 6) left = ar.left;
+  let top = ar.bottom + 4;
+  if (top + mr.height > window.innerHeight - 6) {
+    top = Math.max(6, ar.top - mr.height - 4);
+  }
+  menu.style.left = Math.round(left) + "px";
+  menu.style.top  = Math.round(top)  + "px";
+  _rowMenuEl = menu;
+
+  // Click-outside / esc / scroll closes the menu.
+  setTimeout(() => {
+    document.addEventListener("click", _rowMenuOutsideClick, { once: true });
+  }, 0);
+  document.addEventListener("keydown", _rowMenuKeyDown);
+}
+function _rowMenuOutsideClick(ev) {
+  if (!_rowMenuEl) return;
+  if (_rowMenuEl.contains(ev.target)) return;
+  closeRowMenu();
+}
+function _rowMenuKeyDown(ev) {
+  if (ev.key === "Escape") {
+    closeRowMenu();
+    document.removeEventListener("keydown", _rowMenuKeyDown);
   }
 }
 
@@ -6238,6 +8592,135 @@ let extractPollTimer = 0;
 // On the first tick after running flips to false, refresh once more so
 // the final counts (including the trailing few extracts that landed
 // during the wind-down) make it into the sidebar.
+// --- Unified worker status -------------------------------------------------
+// The sidebar's Status section has one dynamic progress bar that flips
+// label + bar fill based on which worker is currently running. Each
+// per-worker poller below writes its latest payload into workerSnapshot
+// and calls renderWorkerStatus(), which picks the active worker (or the
+// most-recently-finished one for the idle summary).
+const workerSnapshot = {
+  extract:   null,   // { ok, status:{running,done,total,cached,failed,skipped,currentDoc,finishedAt}, extractedCount, totalPdfs }
+  hash:      null,   // { ok, status:{...}, hashedCount, totalDocs }
+  buildings: null,   // { ok, status:{...}, docBuildings, totalBuildings, extractedBuildings }
+};
+
+function renderWorkerStatus() {
+  const el    = document.getElementById("worker-progress");
+  const stopB = document.getElementById("worker-stop");
+  if (!el) return;
+
+  // Pick the currently-running worker. Priority is arbitrary — only one
+  // background worker should be running at a time today, but in case of
+  // overlap we surface extract first (longest-running typically).
+  const running =
+    (workerSnapshot.extract   && workerSnapshot.extract.status.running)   ? "extract" :
+    (workerSnapshot.hash      && workerSnapshot.hash.status.running)      ? "hash" :
+    (workerSnapshot.buildings && workerSnapshot.buildings.status.running) ? "buildings" :
+    null;
+
+  if (running) {
+    const r = workerSnapshot[running];
+    const s = r.status;
+    let label, processed, total;
+    if (running === "extract") {
+      label = "Extracting content";
+      processed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
+      total = s.total;
+    } else if (running === "hash") {
+      label = "Hashing files";
+      processed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
+      total = s.total;
+    } else {
+      label = "Matching buildings";
+      processed = s.done || 0;
+      total = s.total;
+    }
+    const pct = total > 0
+      ? Math.min(100, Math.max(0, (processed / total) * 100))
+      : 0;
+    let msg = label + ": " + processed + " / " + total + " (" + pct.toFixed(1) + "%)";
+    const parts = [];
+    if (running === "buildings") {
+      if (s.matched)    parts.push(s.matched + " matched");
+      if (s.linksAdded) parts.push(s.linksAdded + " links");
+    } else {
+      if (s.done)    parts.push(s.done + " done");
+      if (s.cached)  parts.push(s.cached + " cached");
+      if (s.failed)  parts.push(s.failed + " failed");
+      if (s.skipped) parts.push(s.skipped + " skipped");
+    }
+    if (parts.length) msg += "  ·  " + parts.join(" · ");
+    el.classList.add("running");
+    el.classList.add("with-progress");
+    el.style.setProperty("--progress", pct.toFixed(1) + "%");
+    if (s.currentDoc) {
+      el.innerHTML = "";
+      const top = document.createElement("div"); top.textContent = msg; el.appendChild(top);
+      const cur = document.createElement("div"); cur.className = "current"; cur.textContent = "current: " + s.currentDoc.path;
+      el.appendChild(cur);
+    } else {
+      el.textContent = msg;
+    }
+    // Stop button binds to whichever worker is running.
+    stopB.style.display = "";
+    stopB.dataset.worker = running;
+    stopB.textContent = running === "extract"   ? "Stop extraction"
+                      : running === "hash"      ? "Stop hashing"
+                      : "Stop matching";
+  } else {
+    // Idle. Show whichever idle summary has data; default to the
+    // extract corpus summary (most useful default).
+    el.classList.remove("running");
+    el.classList.remove("with-progress");
+    el.style.removeProperty("--progress");
+    stopB.style.display = "none";
+    stopB.dataset.worker = "";
+    let msg = "Idle";
+    if (workerSnapshot.extract) {
+      const r = workerSnapshot.extract;
+      const pct = r.totalPdfs > 0 ? (r.extractedCount / r.totalPdfs) * 100 : 0;
+      msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs +
+            " docs (" + pct.toFixed(1) + "%)";
+    }
+    el.textContent = msg;
+  }
+}
+
+// Format a worker run's elapsed time + per-1000 rate for the
+// running→idle transition log line. Falls back gracefully when timestamps
+// or counts are missing (e.g. a no-op run that finished with total=0).
+function formatRunTiming(startedAt, finishedAt, processed, label) {
+  if (!startedAt || !finishedAt || processed <= 0) return null;
+  const startMs  = Date.parse(startedAt);
+  const finishMs = Date.parse(finishedAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(finishMs) || finishMs < startMs) {
+    return null;
+  }
+  const elapsedMs = finishMs - startMs;
+  // Human-friendly elapsed: ms < 1s, "1.2s", "37s", "2m 14s"
+  let elapsedStr;
+  if (elapsedMs < 1000) elapsedStr = elapsedMs + "ms";
+  else if (elapsedMs < 60000) elapsedStr = (elapsedMs / 1000).toFixed(elapsedMs < 10000 ? 2 : 1) + "s";
+  else {
+    const m = Math.floor(elapsedMs / 60000);
+    const s = Math.round((elapsedMs - m * 60000) / 1000);
+    elapsedStr = m + "m " + s + "s";
+  }
+  // Rate per 1000 files. Use the same formatter for consistency.
+  const per1000Ms = (elapsedMs / processed) * 1000;
+  let rateStr;
+  if (per1000Ms < 1000) rateStr = per1000Ms.toFixed(0) + "ms";
+  else if (per1000Ms < 60000) rateStr = (per1000Ms / 1000).toFixed(per1000Ms < 10000 ? 2 : 1) + "s";
+  else {
+    const m = Math.floor(per1000Ms / 60000);
+    const s = Math.round((per1000Ms - m * 60000) / 1000);
+    rateStr = m + "m " + s + "s";
+  }
+  return label + ": " + processed.toLocaleString() + " file" +
+         (processed === 1 ? "" : "s") + " in " + elapsedStr +
+         " (" + rateStr + " per 1,000)";
+}
+
 let extractWasRunning = false;
 
 async function refreshExtractStatus() {
@@ -6247,61 +8730,29 @@ async function refreshExtractStatus() {
   } catch { return; }
   if (!r.ok) return;
   const s = r.status;
-  const el    = document.getElementById("extract-status");
-  const stopB = document.getElementById("extract-stop");
-
-  // While running, prefer the in-run counters (s.done + s.cached + s.failed
-  // + s.skipped of s.total) so the bar moves even on all-cached runs that
-  // finish before the corpus-level COUNT(*) reflects the writes. Fall back
-  // to corpus-level for the idle/post-run summary.
-  const runProcessed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
-  const pctRun = s.total > 0
-    ? Math.min(100, Math.max(0, (runProcessed / s.total) * 100))
-    : 0;
-  const pctCorpus = r.totalPdfs > 0
-    ? Math.min(100, Math.max(0, (r.extractedCount / r.totalPdfs) * 100))
-    : 0;
-  const pct = s.running ? pctRun : pctCorpus;
-
-  let msg;
-  if (s.running) {
-    msg = "Extracting: " + runProcessed + " / " + s.total + " (" + pct.toFixed(1) + "%)";
-    const parts = [];
-    if (s.done)    parts.push(s.done + " done");
-    if (s.cached)  parts.push(s.cached + " cached");
-    if (s.failed)  parts.push(s.failed + " failed");
-    if (s.skipped) parts.push(s.skipped + " skipped");
-    if (parts.length) msg += "  ·  " + parts.join(" · ");
-    el.classList.add("running");
-    el.classList.add("with-progress");
-    el.style.setProperty("--progress", pct.toFixed(1) + "%");
-    stopB.style.display = "";
-    if (s.currentDoc) {
-      el.innerHTML = msg + '<div class="current"></div>';
-      el.querySelector(".current").textContent = "current: " + s.currentDoc.path;
-    } else {
-      el.textContent = msg;
-    }
-    refreshTableCounts();
-  } else {
-    msg = "Extracted: " + r.extractedCount + " / " + r.totalPdfs + " PDFs (" + pctCorpus.toFixed(1) + "%)";
-    el.classList.remove("running");
-    el.classList.remove("with-progress");
-    el.style.removeProperty("--progress");
-    stopB.style.display = "none";
-    if (s.finishedAt && s.total > 0) {
-      msg += "  ·  last run: " + s.done + " done";
-      if (s.cached)  msg += ", " + s.cached + " cached";
-      if (s.failed)  msg += ", " + s.failed + " failed";
-    }
-    el.textContent = msg;
-    if (extractWasRunning) refreshTableCounts();
+  workerSnapshot.extract = r;
+  // Mirror running state to the action-menu row's enabled/disabled look —
+  // grey out "Stop extraction" when no extraction is in flight.
+  const stopRow = document.getElementById("action-row-extract-stop");
+  if (stopRow) {
+    stopRow.classList.toggle("disabled", !s.running);
+    stopRow.title = s.running ? "" : "No extraction running";
   }
+  if (s.running) refreshTableCounts();
+  else if (extractWasRunning) refreshTableCounts();
+  renderWorkerStatus();
   // If running state flipped, restart the poll loop with the appropriate
   // cadence (fast while running, slow when idle), and switch the home
   // dashboard's auto-refresh on/off so the user can monitor progress
   // without leaving the home view.
   if (s.running !== extractWasRunning) {
+    // Just-finished log: emit elapsed + per-1000 rate so the user has
+    // a permanent record after the live status pill rolls over.
+    if (extractWasRunning && !s.running) {
+      const processed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
+      const line = formatRunTiming(s.startedAt, s.finishedAt, processed, "Extracted");
+      if (line) log(line, "ok");
+    }
     extractWasRunning = s.running;
     restartExtractPolling();
     if (anyWorkerRunning()) startDashboardPolling();
@@ -6333,50 +8784,21 @@ async function refreshHashStatus() {
   } catch { return; }
   if (!r.ok) return;
   const s = r.status;
-  const el    = document.getElementById("hash-status");
-  const stopB = document.getElementById("hash-stop");
-  if (!el) return;
-
-  const runProcessed = (s.done || 0) + (s.failed || 0) + (s.skipped || 0);
-  const pctRun = s.total > 0
-    ? Math.min(100, Math.max(0, (runProcessed / s.total) * 100))
-    : 0;
-  const pctCorpus = r.totalDocs > 0
-    ? Math.min(100, Math.max(0, (r.hashedCount / r.totalDocs) * 100))
-    : 0;
-  const pct = s.running ? pctRun : pctCorpus;
-
-  let msg;
-  if (s.running) {
-    msg = "Hashing: " + runProcessed + " / " + s.total + " (" + pct.toFixed(1) + "%)";
-    const parts = [];
-    if (s.done)    parts.push(s.done + " done");
-    if (s.failed)  parts.push(s.failed + " failed");
-    if (s.skipped) parts.push(s.skipped + " skipped");
-    if (parts.length) msg += "  ·  " + parts.join(" · ");
-    el.classList.add("running");
-    el.classList.add("with-progress");
-    el.style.setProperty("--progress", pct.toFixed(1) + "%");
-    if (stopB) stopB.style.display = "";
-    if (s.currentDoc) {
-      el.innerHTML = msg + '<div class="current"></div>';
-      el.querySelector(".current").textContent = "current: " + s.currentDoc.path;
-    } else {
-      el.textContent = msg;
-    }
-  } else {
-    msg = "Hashed: " + r.hashedCount + " / " + r.totalDocs + " documents (" + pctCorpus.toFixed(1) + "%)";
-    el.classList.remove("running");
-    el.classList.remove("with-progress");
-    el.style.removeProperty("--progress");
-    if (stopB) stopB.style.display = "none";
-    if (s.finishedAt && s.total > 0) {
-      msg += "  ·  last run: " + s.done + " done";
-      if (s.failed)  msg += ", " + s.failed + " failed";
-    }
-    el.textContent = msg;
+  workerSnapshot.hash = r;
+  // Mirror running state to the action-menu row's enabled/disabled look —
+  // grey out "Stop hashing" when no hash run is in flight.
+  const stopRow = document.getElementById("action-row-hash-stop");
+  if (stopRow) {
+    stopRow.classList.toggle("disabled", !s.running);
+    stopRow.title = s.running ? "" : "No hashing running";
   }
+  renderWorkerStatus();
   if (s.running !== hashWasRunning) {
+    if (hashWasRunning && !s.running) {
+      const processed = (s.done || 0) + (s.cached || 0) + (s.failed || 0) + (s.skipped || 0);
+      const line = formatRunTiming(s.startedAt, s.finishedAt, processed, "Hashed");
+      if (line) log(line, "ok");
+    }
     hashWasRunning = s.running;
     restartHashPolling();
     if (anyWorkerRunning()) startDashboardPolling();
@@ -6478,8 +8900,91 @@ async function runFindDuplicates() {
   }
 }
 
+async function runBuildingsSnapshot() {
+  log("Snapshotting buildings from Snowflake (Kent's CE_HISTORICAL.BUILDING_IDENTITY)…", "info");
+  let r;
+  try {
+    r = await api("/api/buildings-snapshot", {});
+  } catch (e) {
+    log("buildings snapshot failed: " + String(e), "err");
+    return;
+  }
+  if (!r.ok) {
+    log("buildings snapshot failed: " + r.error, "err");
+    return;
+  }
+  log(
+    "buildings: " + r.buildings.fetched + " fetched · " +
+    r.buildings.inserted + " new · " + r.buildings.updated + " updated",
+    "ok",
+  );
+  log(
+    "addresses: " + r.addresses.fetched + " fetched · " +
+    r.addresses.inserted + " new · " + r.addresses.updated + " updated · " +
+    r.addresses.orphaned + " orphaned",
+    "ok",
+  );
+  if (r.ignored) {
+    log(
+      "ignored_buildings (Pyrocomm seed): " + r.ignored.resolved +
+      " resolved · " + r.ignored.inserted + " newly added",
+      "info",
+    );
+  }
+  refreshTableCounts();
+  refreshBuildingsMatchStatus();
+}
+
+async function runBuildingsMatchStart(mode) {
+  const m = mode || "all";
+  const r = await api("/api/buildings-match-start", { onlyMissing: true, sdt: ["JobFiles", "Sales"], mode: m });
+  if (!r.ok) { log("buildings match start failed: " + r.error, "err"); return; }
+  const label = m === "file"    ? "filename / path tokens only"
+              : m === "content" ? "extract-text tokens only"
+              : "filename + extract text";
+  log("Building extractor: " + label + " (background)…", "info");
+  startBuildingsMatchPolling();
+}
+
+async function runBuildingsMatchStop() {
+  const r = await api("/api/buildings-match-stop", {});
+  if (!r.ok) { log("buildings match stop failed: " + r.error, "err"); return; }
+  log("buildings match: stop signal sent", "info");
+}
+
+let buildingsMatchPollTimer = 0;
+function startBuildingsMatchPolling() {
+  if (buildingsMatchPollTimer) return;
+  buildingsMatchPollTimer = setInterval(refreshBuildingsMatchStatus, 1000);
+}
+function stopBuildingsMatchPolling() {
+  if (buildingsMatchPollTimer) { clearInterval(buildingsMatchPollTimer); buildingsMatchPollTimer = 0; }
+}
+async function refreshBuildingsMatchStatus() {
+  let r;
+  try { r = await fetch("/api/buildings-match-status").then((res) => res.json()); }
+  catch { return; }
+  if (!r.ok) return;
+  const s = r.status;
+  workerSnapshot.buildings = r;
+  const stopRow = document.getElementById("action-row-buildings-match-stop");
+  if (stopRow) {
+    stopRow.classList.toggle("disabled", !s.running);
+    stopRow.title = s.running ? "" : "No buildings match running";
+  }
+  renderWorkerStatus();
+  if (!s.running && buildingsMatchPollTimer) {
+    stopBuildingsMatchPolling();
+    refreshTableCounts();
+  }
+}
+
 async function runClassify() {
-  log("Classifying all files (filename rules)…", "info");
+  // Note: the run itself is SDT-agnostic — every file is classified using
+  // rules that match its OWN source_data_type. The "Using X Rules" hint
+  // here just tells the user which rules they were viewing; the classifier
+  // backend runs the full rule set against each file's matching subset.
+  log("Classifying all files (filename rules) — Using " + state.activeSdt + " Rules in editor view", "info");
   setIngestEnabled(false);
   try {
     const r = await api("/api/classify", {});
@@ -6501,6 +9006,7 @@ async function runClassify() {
     }
     await refreshStatus();
     await loadRows();
+    refreshChartsIfActive();
   } catch (e) {
     log(String(e), "err");
   } finally {
@@ -6508,17 +9014,60 @@ async function runClassify() {
   }
 }
 
-async function runClassifyProducts() {
-  log("Classifying products (vendor-scoped rules)…", "info");
+async function runClassifyVendors(mode) {
+  const m = mode || "all";
+  const label = m === "file"    ? "filename / path rules only"
+              : m === "content" ? "content rules only"
+              : "all rules";
+  log("Vendor extractor: " + label, "info");
   setIngestEnabled(false);
   try {
-    const r = await api("/api/classify-products", {});
+    const r = await api("/api/classify-vendors", { mode: m });
+    if (!r.ok) { log(r.error, "err"); return; }
+    log(
+      "vendors: " + r.distinctVendors + " distinct · " +
+      r.docsMatched + "/" + r.docsScanned + " docs matched · " +
+      r.rulesLoaded + " rules fired" +
+      (r.rulesAvailable && r.rulesAvailable !== r.rulesLoaded
+        ? " (of " + r.rulesAvailable + " total)"
+        : ""),
+      "ok",
+    );
+    const top = Object.entries(r.byVendor).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (top.length) {
+      log("top vendors by hits: " +
+        top.map(([k, v]) => k + " " + v).join(" · "), "info");
+    }
+    await refreshStatus();
+    await loadRows();
+    refreshChartsIfActive();
+  } catch (e) {
+    log(String(e), "err");
+  } finally {
+    setIngestEnabled(true);
+  }
+}
+
+async function runClassifyProducts(mode) {
+  // Default mode is "all" so legacy callers (Full Process, the old
+  // single-button action) keep firing every rule.
+  const m = mode || "all";
+  const label = m === "file"    ? "filename / path rules only"
+              : m === "content" ? "content rules only"
+              : "all rules";
+  log("Product extractor: " + label + " — Using " + state.activeSdt + " Rules in editor view", "info");
+  setIngestEnabled(false);
+  try {
+    const r = await api("/api/classify-products", { mode: m });
     if (!r.ok) { log(r.error, "err"); return; }
     log(
       "products: " + r.distinctProducts + " distinct · " +
       r.totalLinks + " links · " +
       r.docsWithProducts + "/" + r.docsScanned + " documents matched · " +
-      r.rulesLoaded + " rules",
+      r.rulesLoaded + " rules fired" +
+      (r.rulesAvailable && r.rulesAvailable !== r.rulesLoaded
+        ? " (of " + r.rulesAvailable + " total)"
+        : ""),
       "ok",
     );
     if (r.unknownVendors && r.unknownVendors.length) {
@@ -6531,6 +9080,7 @@ async function runClassifyProducts() {
     }
     await refreshStatus();
     await loadRows();
+    refreshChartsIfActive();
   } catch (e) {
     log(String(e), "err");
   } finally {
@@ -6539,7 +9089,7 @@ async function runClassifyProducts() {
 }
 
 async function runClassifyByContent() {
-  log("Classifying by extract content (low + unclassified only)…", "info");
+  log("Classifying by extract content (low + unclassified only) — Using " + state.activeSdt + " Rules in editor view", "info");
   setIngestEnabled(false);
   try {
     const r = await api("/api/classify-by-content", {});
@@ -6560,6 +9110,7 @@ async function runClassifyByContent() {
     }
     await refreshStatus();
     await loadRows();
+    refreshChartsIfActive();
   } catch (e) {
     log(String(e), "err");
   } finally {
@@ -6574,21 +9125,32 @@ async function runClassifyByContent() {
 // a handler in this table. Click delegation on the document root keeps
 // wiring trivial — the action rows are static markup, no per-row listener.
 const ACTIONS = {
-  "purge-vendors":       () => runPurge("vendors"),
-  "purge-files":         () => runPurge("files"),
   "purge-all":           () => runPurge("all"),
+  "purge-hashes":        () => runPurge("hashes"),
   "purge-text-backups":  runPurgeTextBackups,
   "run-vendors":         () => runIngest("vendors"),
   "run-files":           () => runIngest("files"),
   "run-full-process":    runFullProcess,
   "classify-all":        runClassify,
   "classify-by-content": runClassifyByContent,
-  "classify-products":   runClassifyProducts,
+  "classify-products":   runClassifyProducts,             // legacy alias = Run All
+  "extract-products-all":     () => runClassifyProducts("all"),
+  "extract-products-file":    () => runClassifyProducts("file"),
+  "extract-products-content": () => runClassifyProducts("content"),
+  "extract-vendors-all":      () => runClassifyVendors("all"),
+  "extract-vendors-file":     () => runClassifyVendors("file"),
+  "extract-vendors-content":  () => runClassifyVendors("content"),
   "extract-start":       runExtractStart,
   "extract-stop":        runExtractStop,
   "hash-start":          runHashStart,
   "hash-stop":           runHashStop,
   "find-duplicates":     runFindDuplicates,
+  "buildings-snapshot":         runBuildingsSnapshot,
+  "buildings-match-start":      runBuildingsMatchStart,    // legacy alias = Run All
+  "extract-buildings-all":      () => runBuildingsMatchStart("all"),
+  "extract-buildings-file":     () => runBuildingsMatchStart("file"),
+  "extract-buildings-content":  () => runBuildingsMatchStart("content"),
+  "buildings-match-stop":       runBuildingsMatchStop,
 };
 
 document.addEventListener("click", (e) => {
@@ -6600,14 +9162,25 @@ document.addEventListener("click", (e) => {
   else log("unknown action: " + action, "err");
 });
 
-document.getElementById("extract-stop").addEventListener("click", runExtractStop);
-{
-  const hashStopBtn = document.getElementById("hash-stop");
-  if (hashStopBtn) hashStopBtn.addEventListener("click", runHashStop);
-}
+// Unified Stop button — its data-worker attribute is set by
+// renderWorkerStatus() to the currently-running worker. Click dispatches
+// to the matching runner.
+document.getElementById("worker-stop").addEventListener("click", () => {
+  const which = document.getElementById("worker-stop").dataset.worker;
+  if (which === "extract")   runExtractStop();
+  else if (which === "hash") runHashStop();
+  else if (which === "buildings") runBuildingsMatchStop();
+});
 document.getElementById("refresh").addEventListener("click", async () => {
   await refreshStatus();
   await loadRows();
+});
+document.getElementById("sdt-switcher").addEventListener("change", (e) => {
+  setActiveSdt(e.target.value);
+});
+// Brand title in the header → home page (All-documents dashboard).
+document.getElementById("brand").addEventListener("click", () => {
+  setActiveHelp("");
 });
 document.getElementById("prev").addEventListener("click", () => {
   state.offset = Math.max(0, state.offset - state.limit);
@@ -6762,15 +9335,22 @@ function wireMultiDropdown(name) {
     panel.style.display = "none";
   });
 }
-document.getElementById("confidence-filter").addEventListener("change", (e) => {
-  // Toolbar dropdown wins back over any drilldown-set exactConfidence.
-  state.exactConfidence = "";
-  state.minConfidence = e.target.value;
+document.getElementById("sdt-filter").addEventListener("change", (e) => {
+  state.sdtFilter = e.target.value || "";
   state.offset = 0;
   loadRows();
 });
 document.getElementById("charts-row").addEventListener("click", () => setActiveCharts());
-document.getElementById("help-row").addEventListener("click", setActiveHelp);
+// Every dashboard row carries data-sdt — empty string = "all docs", or
+// one of "Vendor" / "JobFiles" / "Any". One handler covers them all.
+for (const row of document.querySelectorAll('.table-row[data-view="help"]')) {
+  row.addEventListener("click", () => setActiveHelp(row.dataset.sdt || ""));
+}
+// Same pattern for the three Classification report rows under Results →
+// Reports — each carries the SDT scope on its data-sdt attribute.
+for (const row of document.querySelectorAll('.table-row[data-view="report-classification"]')) {
+  row.addEventListener("click", () => setActiveClassificationReport(row.dataset.sdt || ""));
+}
 document.getElementById("ignored-row").addEventListener("click", setActiveIgnored);
 document.getElementById("ignored-folders-row").addEventListener("click", setActiveIgnoredFolders);
 {
@@ -6782,9 +9362,25 @@ document.getElementById("ignored-folders-row").addEventListener("click", setActi
   if (dupRow) dupRow.addEventListener("click", setActiveDuplicates);
 }
 document.getElementById("doctypes-row").addEventListener("click", () => setActiveTable("document_types"));
+{
+  const cbr = document.getElementById("canonical-buildings-row");
+  if (cbr) cbr.addEventListener("click", () => setActiveTable("canonical_buildings"));
+  const bar = document.getElementById("building-addresses-row");
+  if (bar) bar.addEventListener("click", () => setActiveTable("building_addresses"));
+  const ibr = document.getElementById("ignored-buildings-row");
+  if (ibr) ibr.addEventListener("click", () => setActiveTable("ignored_buildings"));
+}
 
 // Classifier editor sidebar rows + editor toolbar.
-for (const kind of ["filename", "content", "product"]) {
+// Document-type kinds (filename / content) are flat. Entity extractors
+// each have a file-side and a content-side editor that share storage —
+// see CLASSIFIER_KINDS in classifier.js.
+for (const kind of [
+  "filename", "content",
+  "vendor_file", "vendor_content",
+  "product_file", "product_content",
+  "building_file", "building_content",
+]) {
   const row = document.getElementById("classifier-row-" + kind);
   if (row) row.addEventListener("click", () => setActiveClassifierEditor(kind));
 }
@@ -6931,9 +9527,153 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
   localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0");
 });
 
+// --- Sidebar resize -----------------------------------------------------
+// Drag handle on the sidebar's right edge sets aside.style.width during
+// a pointermove, persists the final value in localStorage, and clamps to
+// [SIDEBAR_MIN, SIDEBAR_MAX]. The aside.resizing class disables the
+// width transition so the panel follows the pointer 1:1.
+const SIDEBAR_WIDTH_KEY = "sidebar:width";
+const SIDEBAR_MIN = 160;   // narrower than this and the row labels truncate ugly
+const SIDEBAR_MAX_FRAC = 0.5; // max half the viewport
+function applySidebarWidth(px) {
+  const aside = document.getElementById("sidebar");
+  const max = Math.floor(window.innerWidth * SIDEBAR_MAX_FRAC);
+  const w = Math.max(SIDEBAR_MIN, Math.min(max, px));
+  aside.style.width = w + "px";
+  // Same trick as collapse: kick a resize so Chart.js re-fits.
+  window.dispatchEvent(new Event("resize"));
+  return w;
+}
+// Restore saved width on boot (only when not collapsed — a collapsed
+// sidebar's width is fixed at 24px regardless of saved value).
+(() => {
+  const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (Number.isFinite(saved) && saved >= SIDEBAR_MIN) {
+    const aside = document.getElementById("sidebar");
+    if (!aside.classList.contains("collapsed")) {
+      applySidebarWidth(saved);
+    }
+  }
+})();
+{
+  const handle = document.getElementById("sidebar-resizer");
+  const aside  = document.getElementById("sidebar");
+  if (handle && aside) {
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add("dragging");
+      aside.classList.add("resizing");
+      document.body.classList.add("resizing-sidebar");
+      const startX = e.clientX;
+      const startW = aside.getBoundingClientRect().width;
+      function onMove(ev) {
+        applySidebarWidth(startW + (ev.clientX - startX));
+      }
+      function onUp(ev) {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+        handle.classList.remove("dragging");
+        aside.classList.remove("resizing");
+        document.body.classList.remove("resizing-sidebar");
+        try { handle.releasePointerCapture(ev.pointerId); } catch { /* ignore */ }
+        const finalW = aside.getBoundingClientRect().width;
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(finalW)));
+      }
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    });
+    // Double-click resets to the default width.
+    handle.addEventListener("dblclick", () => {
+      applySidebarWidth(232);
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, "232");
+    });
+  }
+}
+
+// Active source-data-type — UI filter that controls which corpus the user
+// is "in" (Vendor / JobFiles / Sales / Any). Filters editor + log surfaces;
+// every classify call still routes by the file's own source_data_type.
+const SDT_KEY = "enlogosgrag.activeSdt";
+const VALID_ACTIVE_SDTS = ["Vendor", "JobFiles", "Sales", "Any", "All"];
+function loadActiveSdt() {
+  const v = localStorage.getItem(SDT_KEY);
+  if (v && VALID_ACTIVE_SDTS.includes(v)) return v;
+  return "Vendor";  // default — preserves existing single-corpus behavior
+}
+function setActiveSdt(sdt) {
+  if (!VALID_ACTIVE_SDTS.includes(sdt)) return;
+  state.activeSdt = sdt;
+  localStorage.setItem(SDT_KEY, sdt);
+  applyActiveSdtToUi();
+  log("Using " + sdt + " Rules", "info");
+}
+// Apply state.activeSdt to all the UI surfaces that show it: header
+// switcher value, "Using X Rules" banner, classifier editor filter, etc.
+// Cheap idempotent re-render — call after any mutation.
+function applyActiveSdtToUi() {
+  const sw = document.getElementById("sdt-switcher");
+  if (sw && sw.value !== state.activeSdt) sw.value = state.activeSdt;
+  const text = state.activeSdt === "All"
+    ? "Showing All Rules (no filter)"
+    : "Using " + state.activeSdt + " Rules";
+  for (const id of ["sdt-banner", "sdt-sidebar-banner", "sdt-status-banner"]) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+  // (Legacy "Ingest Vendors" SDT-gating removed — that row no longer
+  // exists in the menu. Vendor extraction is now rule-driven via the
+  // Vendor extractor sub-menu and runs only on Vendor-SDT documents
+  // automatically.)
+  // Full Process description is SDT-aware: which entity extractors fire
+  // depends on the active SDT, so we surface the actual step list.
+  const fpDesc = document.getElementById("full-process-desc");
+  if (fpDesc) fpDesc.textContent = fullProcessDescription(state.activeSdt);
+  // If the classifier editor is currently open, re-render so the rule list
+  // filters by the new SDT — and refresh the in-editor reminder banner.
+  if (cedit && cedit.kind && document.getElementById("classifier-editor-view").style.display !== "none") {
+    renderCeditTable();
+    updateCeditSdtReminder();
+  }
+  // If the document_types browse table is currently active, reload so the
+  // server-side SDT filter applies to the visible rows.
+  if (state.view === "table" && state.table === "document_types") {
+    state.offset = 0;
+    loadRows();
+  }
+}
+
+// In-editor reminder banner — sits between the description and the
+// save/discard toolbar on the rule editor. Tells the user the rule list
+// is filtered by the active source-data-type so they don't think rules
+// have gone missing.
+function updateCeditSdtReminder() {
+  const el = document.getElementById("cedit-sdt-reminder");
+  if (!el) return;
+  if (!cedit || !cedit.kind) {
+    el.style.display = "none";
+    return;
+  }
+  const sdt = state.activeSdt || "Vendor";
+  let text;
+  if (sdt === "Any") {
+    text = "Showing all rules (Source Data Type: Any). Switch in the header to filter.";
+  } else {
+    text = "Showing rules for Source Data Type \"" + sdt + "\" + Any. Switch in the header to see other rules.";
+  }
+  el.textContent = text;
+  el.style.display = "block";
+}
+
 // Boot
 (async () => {
+  // Force every sidebar <details> closed on page load. The browser's bfcache
+  // can otherwise restore a previously-open state when navigating back.
+  for (const d of document.querySelectorAll("aside details")) d.open = false;
   applySidebarState(localStorage.getItem(SIDEBAR_KEY) === "1");
+  state.activeSdt = loadActiveSdt();
   await refreshStatus();
   // Hide per-table controls until the user picks a table that exposes them.
   for (const el of document.querySelectorAll(".toolbar .docs-only, .toolbar .ext-only, .toolbar .files-only")) {
@@ -6987,12 +9727,24 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
   });
   setListingPath(localStorage.getItem(LISTING_KEY) || "");
 
+  // Reflect the loaded activeSdt to the UI now that all elements exist.
+  applyActiveSdtToUi();
+
+  // Replay the persisted log ring buffer before any live entries write —
+  // keeps prior-session activity visible after a page reload. Live
+  // entries from this session prepend on top.
+  restoreLog();
+
   // Initial extract status fetch + start polling so the running state
   // picks up automatically after a page reload.
   await refreshExtractStatus();
   startExtractPolling();
   await refreshHashStatus();
   startHashPolling();
+  // One-shot buildings status so the sidebar reflects the current state
+  // without waiting for the user to kick off a match. The matcher poller
+  // only runs while a match is in flight.
+  await refreshBuildingsMatchStatus();
 
   // Default landing page is Home (dashboard). Charts/Tables remain one click away.
   setActiveHelp();
@@ -7053,8 +9805,12 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleClassifyByContent());
       return;
     }
+    if (req.method === "POST" && req.url === "/api/classify-vendors") {
+      sendJson(res, 200, handleClassifyVendors(await readBody(req)));
+      return;
+    }
     if (req.method === "POST" && req.url === "/api/classify-products") {
-      sendJson(res, 200, handleClassifyProducts());
+      sendJson(res, 200, handleClassifyProducts(await readBody(req)));
       return;
     }
     if (req.method === "POST" && req.url === "/api/extract-start") {
@@ -7081,6 +9837,22 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleHashStatus());
       return;
     }
+    if (req.method === "POST" && req.url === "/api/buildings-snapshot") {
+      sendJson(res, 200, await handleBuildingsSnapshot());
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/buildings-match-start") {
+      sendJson(res, 200, handleBuildingsMatchStart(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/buildings-match-stop") {
+      sendJson(res, 200, handleBuildingsMatchStop());
+      return;
+    }
+    if (req.method === "GET" && req.url === "/api/buildings-match-status") {
+      sendJson(res, 200, handleBuildingsMatchStatus());
+      return;
+    }
     if (req.method === "GET" && req.url === "/api/duplicates") {
       sendJson(res, 200, handleDuplicates());
       return;
@@ -7091,6 +9863,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/open-file") {
       sendJson(res, 200, await handleOpenFile(await readBody(req)));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/open-folder") {
+      sendJson(res, 200, await handleOpenFolder(await readBody(req)));
       return;
     }
     if (req.method === "POST" && req.url === "/api/upload-listing") {
@@ -7125,8 +9901,14 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, handleStats(await readBody(req)));
       return;
     }
-    if (req.method === "GET" && req.url === "/api/dashboard") {
-      sendJson(res, 200, handleDashboard());
+    if (req.method === "GET" && req.url.startsWith("/api/dashboard")) {
+      // Accepts an optional ?sdt=Vendor|JobFiles|Sales|Any|All filter.
+      // Anything unrecognized is treated as "no filter".
+      const u = new URL(req.url, "http://localhost");
+      const sdt = u.searchParams.get("sdt") || "";
+      const allowed = ["Vendor", "JobFiles", "Sales", "Any"];
+      const safe = allowed.includes(sdt) ? sdt : "";
+      sendJson(res, 200, handleDashboard(safe));
       return;
     }
     if (req.method === "GET" && req.url === "/api/ignored-types") {
