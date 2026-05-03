@@ -1,8 +1,8 @@
 node_modules/
-db/test.db
-db/test.db-journal
-db/test.db-wal
-db/test.db-shm
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
 uploads/
 *.log
 .DS_Store
